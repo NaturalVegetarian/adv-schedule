@@ -55,11 +55,11 @@ export default function PickingPage() {
         <div className="card-title" style={{ marginBottom: 10 }}>輸入工單資訊</div>
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
           <div>
-            <div style={{ fontSize: 10, color: '#94a3b8', marginBottom: 4, fontWeight: 700 }}>工單打單日</div>
+            <div style={{ fontSize: 15, color: '#94a3b8', marginBottom: 4, fontWeight: 700 }}>工單打單日</div>
             <input type="text" value={orderDate} onChange={e => setOrderDate(e.target.value)} className="inp" placeholder="2026/5/8" />
           </div>
           <div>
-            <div style={{ fontSize: 10, color: '#94a3b8', marginBottom: 4, fontWeight: 700 }}>工單名稱</div>
+            <div style={{ fontSize: 15, color: '#94a3b8', marginBottom: 4, fontWeight: 700 }}>工單名稱</div>
             <input type="text" value={orderName} onChange={e => setOrderName(e.target.value)} className="inp" placeholder="生產工單" />
           </div>
         </div>
@@ -77,8 +77,8 @@ export default function PickingPage() {
               <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                 <span style={{ fontSize: 18 }}>{ICONS[t.key]}</span>
                 <div>
-                  <div style={{ fontSize: 13, fontWeight: 700 }}>{t.label}</div>
-                  <div style={{ fontSize: 10, color: '#94a3b8' }}>{t.note}</div>
+                  <div style={{ fontSize: 15, fontWeight: 700 }}>{t.label}</div>
+                  <div style={{ fontSize: 15, color: '#94a3b8' }}>{t.note}</div>
                 </div>
               </div>
             </div>
@@ -89,14 +89,14 @@ export default function PickingPage() {
                 <div className="big-date">
                   {fmtMD(t.s)} <span style={{ fontSize: 16, fontWeight: 400, color: '#94a3b8' }}>→</span> {fmtMD(t.e)}
                 </div>
-                <div className="big-sub">{fmtWD(t.s)} ～ {fmtWD(t.e)}</div>
+                <div className="big-sub" style={{fontSize:14}}>{fmtWD(t.s)} ～ {fmtWD(t.e)}</div>
               </div>
 
               {/* ERP 日期文字 — 一個複製按鈕 */}
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: '#f8fafc', padding: '8px 10px', borderRadius: 8, marginBottom: t.wh.length > 0 ? 6 : 0 }}>
-                <span style={{ fontFamily: 'monospace', fontSize: 12, color: '#2563eb' }}>{erpText}</span>
+                <span style={{ fontFamily: 'monospace', fontSize: 15, color: '#2563eb' }}>{erpText}</span>
                 <button onClick={() => cp(erpText, erpKey)}
-                  style={{ fontSize: 11, padding: '4px 11px', borderRadius: 8, border: '1px solid #e2e8f0', background: copied===erpKey?'#1e293b':'#fff', color: copied===erpKey?'#fff':'#475569', fontWeight: 700, cursor: 'pointer', transition: 'all .12s', flexShrink: 0, marginLeft: 8 }}>
+                  style={{ fontSize: 14, padding: '4px 11px', borderRadius: 8, border: '1px solid #e2e8f0', background: copied===erpKey?'#1e293b':'#fff', color: copied===erpKey?'#fff':'#475569', fontWeight: 700, cursor: 'pointer', transition: 'all .12s', flexShrink: 0, marginLeft: 8 }}>
                   {copied===erpKey ? '✓ 已複製' : '複製'}
                 </button>
               </div>
@@ -107,11 +107,11 @@ export default function PickingPage() {
                 return (
                   <div key={wi} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: '#f0f9ff', padding: '8px 10px', borderRadius: 8, marginTop: 4 }}>
                     <div>
-                      <span style={{ fontFamily: 'monospace', fontSize: 12, fontWeight: 700, color: '#0369a1' }}>{w.code}</span>
-                      <span style={{ fontSize: 11, color: '#64748b', marginLeft: 8 }}>{w.name}</span>
+                      <span style={{ fontFamily: 'monospace', fontSize: 15, fontWeight: 700, color: '#0369a1' }}>{w.code}</span>
+                      <span style={{ fontSize: 14, color: '#64748b', marginLeft: 8 }}>{w.name}</span>
                     </div>
                     <button onClick={() => cp(w.code, locKey)}
-                      style={{ fontSize: 11, padding: '4px 11px', borderRadius: 8, border: '1px solid #bae6fd', background: copied===locKey?'#0369a1':'#fff', color: copied===locKey?'#fff':'#0369a1', fontWeight: 700, cursor: 'pointer', transition: 'all .12s', flexShrink: 0, marginLeft: 8 }}>
+                      style={{ fontSize: 14, padding: '4px 11px', borderRadius: 8, border: '1px solid #bae6fd', background: copied===locKey?'#0369a1':'#fff', color: copied===locKey?'#fff':'#0369a1', fontWeight: 700, cursor: 'pointer', transition: 'all .12s', flexShrink: 0, marginLeft: 8 }}>
                       {copied===locKey ? '✓ 已複製' : '複製位置'}
                     </button>
                   </div>

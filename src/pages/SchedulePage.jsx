@@ -158,7 +158,7 @@ export default function SchedulePage() {
     <div>
       {/* 客訂扣除提示 */}
       {deductSummary.length > 0 && (
-        <div style={{ background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 10, padding: '8px 12px', marginBottom: 10, fontSize: 12, color: '#7f1d1d' }}>
+        <div style={{ background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 10, padding: '8px 12px', marginBottom: 10, fontSize: 15, color: '#7f1d1d' }}>
           <strong>客訂庫存扣除：</strong> {deductSummary.map(([f, v]) => `${f} -${v}包`).join(' · ')}（未出貨客訂已從預估庫存扣除）
         </div>
       )}
@@ -169,24 +169,24 @@ export default function SchedulePage() {
           庫存預估（自動更新）
           <div style={{ display: 'flex', gap: 3, flexWrap: 'wrap' }}>
             {[['#f0fdf4','#166534','充足'],['#fefce8','#713f12','偏低'],['#fff7ed','#7c2d12','紅燈'],['#fef2f2','#7f1d1d','緊急'],['#f8fafc','#475569','灰燈']].map(([bg,tc,l]) => (
-              <span key={l} className="bdg" style={{ background: bg, color: tc, fontSize: 10 }}>{l}</span>
+              <span key={l} className="bdg" style={{ background: bg, color: tc, fontSize: 15 }}>{l}</span>
             ))}
           </div>
         </div>
         <div style={{ overflowX: 'auto', maxHeight: 380, overflowY: 'auto' }}>
           <table className="it" dangerouslySetInnerHTML={{ __html: invHTML }}></table>
         </div>
-        <div style={{ fontSize: 10, color: '#94a3b8', marginTop: 5 }}>粗框=當日入庫 · 條=庫存/最低庫存 · 雙線=月份 · ║=主∣副 · 紅字=客訂扣除</div>
+        <div style={{ fontSize: 15, color: '#94a3b8', marginTop: 5 }}>粗框=當日入庫 · 條=庫存/最低庫存 · 雙線=月份 · ║=主∣副 · 紅字=客訂扣除</div>
       </div>
 
       {/* 排程輸入（中） */}
       <div className="card">
         <div className="card-title">
           排程輸入
-          <span style={{ fontSize: 11, color: '#64748b', fontWeight: 400 }}>合計 <strong style={{ color: '#1e293b' }}>{tot > 0 ? `${tot.toLocaleString()}包` : '—'}</strong></span>
+          <span style={{ fontSize: 14, color: '#64748b', fontWeight: 400 }}>合計 <strong style={{ color: '#1e293b' }}>{tot > 0 ? `${tot.toLocaleString()}包` : '—'}</strong></span>
         </div>
         <div style={{ overflowX: 'auto' }}>
-          <table className="tbl" style={{ fontSize: 12 }}>
+          <table className="tbl" style={{ fontSize: 15 }}>
             <thead><tr>
               <th style={{ width: 54 }}>生產日</th>
               <th style={{ width: 82 }}>品項</th>
@@ -201,11 +201,11 @@ export default function SchedulePage() {
                 const isSub = SUB.includes(r.item)
                 return (
                   <tr key={i} style={{ background: isSub ? 'rgba(109,40,217,.04)' : 'transparent' }}>
-                    <td><input className="inp" value={r.date} style={{ width: 48, fontSize: 11 }} onChange={e => updateSch(i, 'date', e.target.value)} /></td>
+                    <td><input className="inp" value={r.date} style={{ width: 48, fontSize: 14 }} onChange={e => updateSch(i, 'date', e.target.value)} /></td>
                     <td>
                       <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
                         {isSub && <span style={{ fontSize: 8, background: '#ede9fe', color: '#5b21b6', borderRadius: 2, padding: '1px 3px', flexShrink: 0 }}>副</span>}
-                        <select className="inp" style={{ width: isSub ? 58 : 70, fontSize: 11 }} value={r.item} onChange={e => updateSch(i, 'item', e.target.value)}>
+                        <select className="inp" style={{ width: isSub ? 58 : 70, fontSize: 14 }} value={r.item} onChange={e => updateSch(i, 'item', e.target.value)}>
                           <optgroup label="主產品">{MAIN.map(f => <option key={f}>{f}</option>)}</optgroup>
                           <optgroup label="副產品">{SUB.map(f => <option key={f}>{f}</option>)}</optgroup>
                         </select>
@@ -213,13 +213,13 @@ export default function SchedulePage() {
                     </td>
                     <td>
                       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4 }}>
-                        <button onClick={() => updateSch(i, 'barrels', Math.max(1, r.barrels-1))} style={{ width: 20, height: 20, borderRadius: '50%', border: '1px solid #e2e8f0', background: '#fff', fontSize: 12, cursor: 'pointer', lineHeight: 1, flexShrink: 0 }}>−</button>
+                        <button onClick={() => updateSch(i, 'barrels', Math.max(1, r.barrels-1))} style={{ width: 20, height: 20, borderRadius: '50%', border: '1px solid #e2e8f0', background: '#fff', fontSize: 15, cursor: 'pointer', lineHeight: 1, flexShrink: 0 }}>−</button>
                         <span style={{ fontSize: 14, fontWeight: 700, minWidth: 14, textAlign: 'center' }}>{r.barrels}</span>
-                        <button onClick={() => updateSch(i, 'barrels', r.barrels+1)} style={{ width: 20, height: 20, borderRadius: '50%', border: '1px solid #e2e8f0', background: '#fff', fontSize: 12, cursor: 'pointer', lineHeight: 1, flexShrink: 0 }}>＋</button>
+                        <button onClick={() => updateSch(i, 'barrels', r.barrels+1)} style={{ width: 20, height: 20, borderRadius: '50%', border: '1px solid #e2e8f0', background: '#fff', fontSize: 15, cursor: 'pointer', lineHeight: 1, flexShrink: 0 }}>＋</button>
                       </div>
                     </td>
-                    <td style={{ textAlign: 'right', fontWeight: 700, fontSize: 12, paddingRight: 5 }}>{pk > 0 ? pk.toLocaleString() : '—'}</td>
-                    <td><input className="inp" value={r.inDate||''} style={{ width: 46, fontSize: 11 }} onChange={e => updateSch(i, 'inDate', e.target.value)} /></td>
+                    <td style={{ textAlign: 'right', fontWeight: 700, fontSize: 15, paddingRight: 5 }}>{pk > 0 ? pk.toLocaleString() : '—'}</td>
+                    <td><input className="inp" value={r.inDate||''} style={{ width: 46, fontSize: 14 }} onChange={e => updateSch(i, 'inDate', e.target.value)} /></td>
                     <td><button onClick={() => setSchData(d => d.filter((_,j) => j!==i))} style={{ color: '#94a3b8', background: 'none', border: 'none', cursor: 'pointer', fontSize: 14, padding: '0 2px' }}>×</button></td>
                   </tr>
                 )
@@ -227,7 +227,7 @@ export default function SchedulePage() {
             </tbody>
           </table>
         </div>
-        <button onClick={() => setSchData(d => [...d, { date: '', item: '黃金', barrels: 4, inDate: '' }])} style={{ marginTop: 8, fontSize: 11, color: '#94a3b8', background: 'none', border: '1px dashed #e2e8f0', borderRadius: 7, padding: '5px 0', cursor: 'pointer', width: '100%' }}>+ 新增排程列</button>
+        <button onClick={() => setSchData(d => [...d, { date: '', item: '黃金', barrels: 4, inDate: '' }])} style={{ marginTop: 8, fontSize: 14, color: '#94a3b8', background: 'none', border: '1px dashed #e2e8f0', borderRadius: 7, padding: '5px 0', cursor: 'pointer', width: '100%' }}>+ 新增排程列</button>
       </div>
 
       {/* AI 建議（下） */}
@@ -238,16 +238,16 @@ export default function SchedulePage() {
           <summary>原料菜價管理（各蔬菜可自設飆漲標準）</summary>
           <div style={{ marginTop: 8, padding: 10, background: '#f8fafc', borderRadius: 8, border: '1px solid #f1f5f9' }}>
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 78px 78px 50px 28px', gap: 5, marginBottom: 5, paddingBottom: 4, borderBottom: '1px solid #e2e8f0' }}>
-              {['蔬菜','本週價(元/kg)','飆漲標準','狀態',''].map(h => <span key={h} style={{ fontSize: 10, fontWeight: 700, color: '#64748b' }}>{h}</span>)}
+              {['蔬菜','本週價(元/kg)','飆漲標準','狀態',''].map(h => <span key={h} style={{ fontSize: 15, fontWeight: 700, color: '#64748b' }}>{h}</span>)}
             </div>
             {vegData.map((v, i) => {
               const p = parseFloat(v.price)||0; const high = p>0 && p>v.thresh
               return (
                 <div key={i} className="veg-row">
-                  <input className="inp" value={v.name} style={{ fontSize: 11 }} onChange={e => { const n=[...vegData]; n[i]={...n[i],name:e.target.value}; setVegData(n) }} />
-                  <input type="number" className="inp" value={v.price} placeholder="價格" style={{ fontSize: 11, borderColor: high ? '#f87171' : '', background: high ? '#fef2f2' : '' }} onChange={e => { const n=[...vegData]; n[i]={...n[i],price:e.target.value}; setVegData(n) }} />
-                  <input type="number" className="inp" value={v.thresh} style={{ fontSize: 11 }} onChange={e => { const n=[...vegData]; n[i]={...n[i],thresh:+e.target.value}; setVegData(n) }} />
-                  <span className="bdg" style={{ fontSize: 10, background: p>0?(high?'#fef2f2':'#f0fdf4'):'#f8fafc', color: p>0?(high?'#7f1d1d':'#166534'):'#94a3b8' }}>{p>0?(high?'飆漲':'正常'):'—'}</span>
+                  <input className="inp" value={v.name} style={{ fontSize: 14 }} onChange={e => { const n=[...vegData]; n[i]={...n[i],name:e.target.value}; setVegData(n) }} />
+                  <input type="number" className="inp" value={v.price} placeholder="價格" style={{ fontSize: 14, borderColor: high ? '#f87171' : '', background: high ? '#fef2f2' : '' }} onChange={e => { const n=[...vegData]; n[i]={...n[i],price:e.target.value}; setVegData(n) }} />
+                  <input type="number" className="inp" value={v.thresh} style={{ fontSize: 14 }} onChange={e => { const n=[...vegData]; n[i]={...n[i],thresh:+e.target.value}; setVegData(n) }} />
+                  <span className="bdg" style={{ fontSize: 15, background: p>0?(high?'#fef2f2':'#f0fdf4'):'#f8fafc', color: p>0?(high?'#7f1d1d':'#166534'):'#94a3b8' }}>{p>0?(high?'飆漲':'正常'):'—'}</span>
                   <button className="btn btn-sm btn-red" onClick={() => setVegData(d => d.filter((_,j) => j!==i))}>刪</button>
                 </div>
               )
@@ -260,13 +260,13 @@ export default function SchedulePage() {
           <summary>補充規則 ／ 排程規則管理</summary>
           <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 7 }}>
             <textarea className="inp" value={extraRules} onChange={e => setExtraRules(e.target.value)} placeholder={`補充本週特殊狀況，例如：\n· 青江菜飆漲，綠蔬先暫緩\n· 下週大客單，多備黃金泡菜`} />
-            <div style={{ fontSize: 11, fontWeight: 700, color: '#64748b' }}>排程規則（可編輯）</div>
+            <div style={{ fontSize: 14, fontWeight: 700, color: '#64748b' }}>排程規則（可編輯）</div>
             {rules.map((r, i) => (
               <div key={i} style={{ display: 'flex', gap: 6, alignItems: 'center', padding: '3px 0', borderBottom: '1px solid #f8fafc' }}>
-                <span style={{ fontSize: 10, color: '#94a3b8', minWidth: 16 }}>{i+1}.</span>
+                <span style={{ fontSize: 15, color: '#94a3b8', minWidth: 16 }}>{i+1}.</span>
                 {ruleEdit
-                  ? <><input className="inp" value={r} style={{ flex: 1, fontSize: 11 }} onChange={e => { const n=[...rules]; n[i]=e.target.value; setRules(n) }} /><button className="btn btn-sm btn-red" onClick={() => setRules(r2 => r2.filter((_,j) => j!==i))}>刪</button></>
-                  : <span style={{ flex: 1, fontSize: 12 }}>{r}</span>
+                  ? <><input className="inp" value={r} style={{ flex: 1, fontSize: 14 }} onChange={e => { const n=[...rules]; n[i]=e.target.value; setRules(n) }} /><button className="btn btn-sm btn-red" onClick={() => setRules(r2 => r2.filter((_,j) => j!==i))}>刪</button></>
+                  : <span style={{ flex: 1, fontSize: 15 }}>{r}</span>
                 }
               </div>
             ))}
@@ -277,9 +277,9 @@ export default function SchedulePage() {
           </div>
         </details>
 
-        {aiLoading && <div style={{ fontSize: 12, color: '#94a3b8', padding: '6px 0' }}>分析中...</div>}
-        {aiText && <pre style={{ fontSize: 12, lineHeight: 1.8, whiteSpace: 'pre-wrap', fontFamily: 'Noto Sans TC,sans-serif', color: '#1e293b', background: '#f8fafc', padding: '10px 12px', borderRadius: 8, marginTop: 4 }}>{aiText}</pre>}
-        {!aiLoading && !aiText && <div style={{ fontSize: 12, color: '#94a3b8', padding: '6px 0' }}>點「重新分析」產生 AI 建議排程</div>}
+        {aiLoading && <div style={{ fontSize: 15, color: '#94a3b8', padding: '6px 0' }}>分析中...</div>}
+        {aiText && <pre style={{ fontSize: 15, lineHeight: 1.8, whiteSpace: 'pre-wrap', fontFamily: 'Noto Sans TC,sans-serif', color: '#1e293b', background: '#f8fafc', padding: '10px 12px', borderRadius: 8, marginTop: 4 }}>{aiText}</pre>}
+        {!aiLoading && !aiText && <div style={{ fontSize: 15, color: '#94a3b8', padding: '6px 0' }}>點「重新分析」產生 AI 建議排程</div>}
       </div>
     </div>
   )
