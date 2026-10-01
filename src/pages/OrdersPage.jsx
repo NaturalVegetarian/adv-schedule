@@ -37,12 +37,13 @@ export default function OrdersPage({ user }) {
   }
   const [formData, setFormData] = useState(emptyForm)
 
+  const fetchOrders = async () => {
+    const { data, error } = await supabase.from('adv_orders').select('*').order('created_at', { ascending: false })
+    if (!error && data) setOrders(data)
+    setLoading(false)
+  }
+
   useEffect(() => {
-    const fetchOrders = async () => {
-      const { data, error } = await supabase.from('adv_orders').select('*').order('created_at', { ascending: false })
-      if (!error && data) setOrders(data)
-      setLoading(false)
-    }
     fetchOrders()
     const channel = supabase.channel('adv_orders').on('postgres_changes', { event: '*', schema: 'public', table: 'adv_orders' }, () => fetchOrders()).subscribe()
     return () => supabase.removeChannel(channel)
@@ -113,6 +114,7 @@ export default function OrdersPage({ user }) {
       })
       if (error) throw error
       showToast(editingOrderId ? '訂單修改成功 ✅' : '訂單已儲存 ✅')
+      fetchOrders()
       if (formData.is_mixed_box && submitActionRef.current === 'continue' && !editingOrderId) {
         setFormData(p => ({ ...p, item_name: '', quantity: '', notes: '' }))
         setBoxCountInput(''); setBoxQtyInput('')
@@ -126,6 +128,7 @@ export default function OrdersPage({ user }) {
     const idx = states.indexOf(order.status)
     const next = Math.max(0, Math.min(states.length - 1, idx + direction))
     await supabase.from('adv_orders').update({ status: states[next], updated_at: new Date().toISOString() }).eq('id', order.id)
+    fetchOrders()
     showToast(`狀態更新：${['待安排', '已排程', '已備貨', '已出貨'][next]}`)
   }
 
@@ -144,6 +147,7 @@ export default function OrdersPage({ user }) {
   const deleteOrder = async id => {
     if (!confirm('確定要永久刪除這筆單嗎？')) return
     await supabase.from('adv_orders').delete().eq('id', id)
+    fetchOrders()
   }
 
   const saveNewFlavor = async () => {
