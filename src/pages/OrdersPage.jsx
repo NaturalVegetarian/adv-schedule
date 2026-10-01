@@ -1,8 +1,6 @@
 import { useState, useEffect, useMemo, useRef } from 'react'
 import { supabase } from '../lib/supabase'
 
-const PORTAL = 'https://company-portal-dusky.vercel.app/'
-
 export default function OrdersPage({ user }) {
   const [orders, setOrders] = useState([])
   const [loading, setLoading] = useState(true)
@@ -21,10 +19,19 @@ export default function OrdersPage({ user }) {
   const [filterFlavor, setFilterFlavor] = useState('')
   const [toast, setToast] = useState(null)
   const [pendingOrderData, setPendingOrderData] = useState(null)
+  const [formError, setFormError] = useState('')
   const submitActionRef = useRef('normal')
+
+  // 新增：箱數換算模式
+  const [useBoxCalc, setUseBoxCalc] = useState(false)
+  const [boxCount, setBoxCount] = useState('')
+  const [boxQty, setBoxQty] = useState('')
+
   const [formData, setFormData] = useState({
-    customerName: '', itemName: '', quantity: '', unit: '袋', piecesPerUnit: 250,
-    logistics: '', boxType: '', itemsPerBox: '', shippingMark: false,
+    customerName: '', itemName: '', quantity: '', unit: '袋',
+    weightPerBag: 5250,  // 改為重量(g)
+    logistics: '', boxType: '', itemsPerBox: '',
+    shippingMark: false, colorMark: false, colorMarkNote: '',
     isMixedBox: false, targetDate: '', scheduledDate: '', notes: ''
   })
 
@@ -48,26 +55,50 @@ export default function OrdersPage({ user }) {
   }, [])
 
   const showToast = msg => { setToast(msg); setTimeout(() => setToast(null), 3000) }
-  const getNormalBasis = name => flavorConfigs[name] || (name.includes('香羹') ? 1 : 40)
 
   const handleInputChange = e => {
     const { name, value, type, checked } = e.target
-    if (name === 'itemName') {
-      setFormData(p => ({ ...p, [name]: value, piecesPerUnit: value.includes('香羹') ? 6 : 250 }))
-    } else {
-      setFormData(p => ({ ...p, [name]: type === 'checkbox' ? checked : value }))
-    }
+    setFormData(p => ({ ...p, [name]: type === 'checkbox' ? checked : value }))
+    if (formError) setFormError('')
   }
+
+  // 箱數換算：箱數 × 箱入 = 包數
+  const calcedQty = useMemo(() => {
+    const b = parseInt(boxCount) || 0
+    const q = parseInt(boxQty) || 0
+    return b * q
+  }, [boxCount, boxQty])
 
   const handleFormSubmit = e => {
     e.preventDefault()
+    setFormError('')
+
+    // 驗證必填
+    if (!formData.customerName.trim()) { setFormError('請填寫客戶名稱'); return }
+    if (!formData.itemName) { setFormError('請選擇口味品項'); return }
+    if (!formData.targetDate) { setFormError('請選擇指定出貨日'); return }
+
+    // 計算最終包數
+    let finalQty = 0
+    if (useBoxCalc) {
+      if (!boxCount || !boxQty) { setFormError('請填寫箱數與每箱入數'); return }
+      finalQty = calcedQty
+    } else {
+      finalQty = Math.round(Number(formData.quantity)) || 0
+      if (finalQty <= 0) { setFormError('請填寫訂購數量'); return }
+    }
+
     const finalData = {
       ...formData,
-      quantity: Math.round(Number(formData.quantity)) || 0,
-      piecesPerUnit: Number(formData.piecesPerUnit) || 0,
+      quantity: finalQty,
+      unit: '袋',
+      weightPerBag: Number(formData.weightPerBag) || 5250,
       itemsPerBox: Math.round(Number(formData.itemsPerBox)) || 0,
       customerName: formData.customerName.trim(),
-      notes: formData.notes?.trim() || ''
+      notes: formData.notes?.trim() || '',
+      // 箱數資訊一併存
+      boxCount: useBoxCalc ? parseInt(boxCount) || 0 : 0,
+      boxQtyEach: useBoxCalc ? parseInt(boxQty) || 0 : 0,
     }
     setPendingOrderData(finalData)
     setIsConfirmOpen(true)
@@ -89,25 +120,31 @@ export default function OrdersPage({ user }) {
       showToast(editingOrderId ? '訂單修改成功 ✅' : '訂單已儲存 ✅')
       if (formData.isMixedBox && submitActionRef.current === 'continue' && !editingOrderId) {
         setFormData(p => ({ ...p, itemName: '', quantity: '', notes: '' }))
+        setBoxCount(''); setBoxQty('')
         setIsConfirmOpen(false); setPendingOrderData(null)
       } else { setIsConfirmOpen(false); setPendingOrderData(null); closeForm() }
-    } catch { alert('儲存失敗，請重試。') }
+    } catch (err) { alert('儲存失敗：' + (err.message || '請重試')) }
   }
 
   const changeStatus = async (order, direction) => {
     const states = ['pending', 'scheduled', 'prepared', 'shipped']
     const idx = states.indexOf(order.status)
-    const next = Math.max(0, Math.min(states.length-1, idx+direction))
+    const next = Math.max(0, Math.min(states.length - 1, idx + direction))
     const { error } = await supabase.from('adv_orders').update({ status: states[next], updated_at: new Date().toISOString() }).eq('id', order.id)
-    if (!error) showToast(`狀態更新：${['待安排','已排程','已備貨','已出貨'][next]}`)
+    if (!error) showToast(`狀態更新：${['待安排', '已排程', '已備貨', '已出貨'][next]}`)
   }
 
   const closeForm = () => {
     setIsFormOpen(false); setEditingOrderId(null); setIsAddingNewItem(false)
-    setFormData({ customerName: '', itemName: '', quantity: '', unit: '袋', piecesPerUnit: 250, logistics: '', boxType: '', itemsPerBox: '', shippingMark: false, isMixedBox: false, targetDate: '', scheduledDate: '', notes: '' })
+    setFormError(''); setUseBoxCalc(false); setBoxCount(''); setBoxQty('')
+    setFormData({ customerName: '', itemName: '', quantity: '', unit: '袋', weightPerBag: 5250, logistics: '', boxType: '', itemsPerBox: '', shippingMark: false, colorMark: false, colorMarkNote: '', isMixedBox: false, targetDate: '', scheduledDate: '', notes: '' })
   }
 
-  const openEditForm = order => { setFormData({ ...order }); setEditingOrderId(order.id); setIsFormOpen(true) }
+  const openEditForm = order => {
+    setFormData({ ...order, colorMark: order.colorMark || false, colorMarkNote: order.colorMarkNote || '' })
+    if (order.boxCount > 0) { setUseBoxCalc(true); setBoxCount(String(order.boxCount)); setBoxQty(String(order.boxQtyEach)) }
+    setEditingOrderId(order.id); setIsFormOpen(true)
+  }
 
   const deleteOrder = async id => {
     if (!confirm('確定要永久刪除這筆單嗎？')) return
@@ -117,9 +154,9 @@ export default function OrdersPage({ user }) {
   const saveNewFlavor = async () => {
     if (!newItemName.trim()) return
     const items = [...savedItems, newItemName.trim()]
-    const configs = { ...flavorConfigs, [newItemName.trim()]: newItemName.includes('香羹') ? 1 : 40 }
+    const configs = { ...flavorConfigs, [newItemName.trim()]: 40 }
     const { error } = await supabase.from('adv_flavor_config').upsert({ id: 'default', configs, items, updated_at: new Date().toISOString() })
-    if (!error) { setFormData(p => ({ ...p, itemName: newItemName.trim(), piecesPerUnit: newItemName.includes('香羹') ? 6 : 250 })); setNewItemName(''); setIsAddingNewItem(false); showToast('規格新增成功 ✅') }
+    if (!error) { setFormData(p => ({ ...p, itemName: newItemName.trim() })); setNewItemName(''); setIsAddingNewItem(false); showToast('規格新增成功 ✅') }
   }
 
   const openSettings = () => {
@@ -135,35 +172,35 @@ export default function OrdersPage({ user }) {
     if (!error) { setIsSettingsOpen(false); showToast('品名與基準已同步 ✅') }
   }
 
-  const sortedOrders = useMemo(() => [...orders].sort((a,b) => new Date(b.created_at) - new Date(a.created_at)), [orders])
-  const filteredOrders = sortedOrders.filter(o => o.status === activeTab && (o.itemName||'').includes(filterFlavor))
-  const groupedByCustomer = filteredOrders.reduce((acc, o) => { const k = o.customerName||'未知客戶'; if(!acc[k])acc[k]=[]; acc[k].push(o); return acc }, {})
+  const sortedOrders = useMemo(() => [...orders].sort((a, b) => new Date(b.created_at) - new Date(a.created_at)), [orders])
+  const filteredOrders = sortedOrders.filter(o => o.status === activeTab && (o.itemName || '').includes(filterFlavor))
+  const groupedByCustomer = filteredOrders.reduce((acc, o) => { const k = o.customerName || '未知客戶'; if (!acc[k]) acc[k] = []; acc[k].push(o); return acc }, {})
 
-  const formatDate = d => d ? `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}` : ''
+  const formatDate = d => d ? `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}` : ''
   const getNextWeekRange = date => {
     const d = new Date(date), day = d.getDay()
-    const nMon = new Date(d); nMon.setDate(d.getDate() + ((8-day)%7||7))
-    const nFri = new Date(nMon); nFri.setDate(nMon.getDate()+4)
+    const nMon = new Date(d); nMon.setDate(d.getDate() + ((8 - day) % 7 || 7))
+    const nFri = new Date(nMon); nFri.setDate(nMon.getDate() + 4)
     return { start: nMon, end: nFri }
   }
   const nextWeek = getNextWeekRange(selectedDate)
-  const nextWeekSummary = sortedOrders.filter(o => { if(!o.targetDate)return false; const d=new Date(o.targetDate); return d>=nextWeek.start&&d<=nextWeek.end }).reduce((acc,o) => { if(!acc[o.itemName])acc[o.itemName]={qty:0,pieces:0,unit:o.unit}; acc[o.itemName].qty+=Number(o.quantity); acc[o.itemName].pieces+=Number(o.quantity)*Number(o.piecesPerUnit||0); return acc }, {})
-  const customerSummary = sortedOrders.filter(o => o.targetDate === formatDate(selectedDate)).reduce((acc,o) => { if(!acc[o.customerName])acc[o.customerName]={items:[],totalBags:0}; acc[o.customerName].items.push(o); acc[o.customerName].totalBags+=Number(o.quantity); return acc }, {})
+  const nextWeekSummary = sortedOrders.filter(o => { if (!o.targetDate) return false; const d = new Date(o.targetDate); return d >= nextWeek.start && d <= nextWeek.end }).reduce((acc, o) => { if (!acc[o.itemName]) acc[o.itemName] = { qty: 0, unit: o.unit }; acc[o.itemName].qty += Number(o.quantity); return acc }, {})
+  const customerSummary = sortedOrders.filter(o => o.targetDate === formatDate(selectedDate)).reduce((acc, o) => { if (!acc[o.customerName]) acc[o.customerName] = { items: [], totalQty: 0 }; acc[o.customerName].items.push(o); acc[o.customerName].totalQty += Number(o.quantity); return acc }, {})
   const calendarData = useMemo(() => {
     const year = currentMonth.getFullYear(), month = currentMonth.getMonth()
-    const firstDay = new Date(year,month,1).getDay(), totalDays = new Date(year,month+1,0).getDate()
+    const firstDay = new Date(year, month, 1).getDay(), totalDays = new Date(year, month + 1, 0).getDate()
     const days = []
-    for(let i=0;i<firstDay;i++) days.push(null)
-    for(let i=1;i<=totalDays;i++) days.push(new Date(year,month,i))
+    for (let i = 0; i < firstDay; i++) days.push(null)
+    for (let i = 1; i <= totalDays; i++) days.push(new Date(year, month, i))
     return days
   }, [currentMonth])
 
   const THEME = {
-    pending:   { bg: '#fffbeb', header: '#f59e0b', accent: '#92400e', btn: '#d97706', border: '#fde68a' },
-    scheduled: { bg: '#f0fdf4', header: '#10b981', accent: '#065f46', btn: '#059669', border: '#a7f3d0' },
-    prepared:  { bg: '#eff6ff', header: '#3b82f6', accent: '#1e3a8a', btn: '#2563eb', border: '#bfdbfe' },
-    shipped:   { bg: '#f8fafc', header: '#64748b', accent: '#1e293b', btn: '#475569', border: '#e2e8f0' },
-    stats:     { bg: '#fff1f2', header: '#f43f5e', accent: '#881337', btn: '#e11d48', border: '#fecdd3' },
+    pending:   { bg: '#fffbeb', header: '#f59e0b', accent: '#92400e', border: '#fde68a' },
+    scheduled: { bg: '#f0fdf4', header: '#10b981', accent: '#065f46', border: '#a7f3d0' },
+    prepared:  { bg: '#eff6ff', header: '#3b82f6', accent: '#1e3a8a', border: '#bfdbfe' },
+    shipped:   { bg: '#f8fafc', header: '#64748b', accent: '#1e293b', border: '#e2e8f0' },
+    stats:     { bg: '#fff1f2', header: '#f43f5e', accent: '#881337', border: '#fecdd3' },
   }
   const th = THEME[activeTab] || THEME.pending
 
@@ -189,8 +226,8 @@ export default function OrdersPage({ user }) {
       <div style={{ maxWidth: 600, margin: '0 auto', padding: '12px 16px' }}>
         {/* 子頁簽 */}
         <div style={{ display: 'flex', background: 'rgba(255,255,255,.5)', borderRadius: 16, padding: 4, marginBottom: 12, gap: 2, overflowX: 'auto' }}>
-          {[['pending','待安排'],['scheduled','已排程'],['prepared','已備貨'],['shipped','已出貨'],['stats','日曆統計']].map(([t,l]) => (
-            <button key={t} onClick={() => setActiveTab(t)} style={{ flex: 1, minWidth: 60, padding: '8px 4px', borderRadius: 12, border: 'none', fontSize: 14, fontWeight: 700, cursor: 'pointer', background: activeTab===t ? th.header : 'transparent', color: activeTab===t ? '#fff' : '#94a3b8', transition: 'all .15s' }}>{l}</button>
+          {[['pending', '待安排'], ['scheduled', '已排程'], ['prepared', '已備貨'], ['shipped', '已出貨'], ['stats', '日曆統計']].map(([t, l]) => (
+            <button key={t} onClick={() => setActiveTab(t)} style={{ flex: 1, minWidth: 60, padding: '8px 4px', borderRadius: 12, border: 'none', fontSize: 14, fontWeight: 700, cursor: 'pointer', background: activeTab === t ? th.header : 'transparent', color: activeTab === t ? '#fff' : '#94a3b8', transition: 'all .15s' }}>{l}</button>
           ))}
         </div>
 
@@ -204,49 +241,48 @@ export default function OrdersPage({ user }) {
             : Object.entries(groupedByCustomer).map(([name, list]) => (
               <div key={name} style={{ background: '#fff', borderRadius: 24, border: `1px solid ${th.border}`, overflow: 'hidden', marginBottom: 16 }}>
                 <div style={{ background: 'rgba(255,255,255,.5)', padding: '12px 16px', borderBottom: `1px solid ${th.border}`, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                     <span style={{ fontSize: 16, fontWeight: 900, color: '#475569' }}>{name}</span>
-                    {list[0]?.shippingMark && <span style={{ fontSize: 15, background: '#fef2f2', color: '#ef4444', padding: '1px 8px', borderRadius: 20, fontWeight: 700 }}>🏷️ 需麥頭</span>}
+                    {list[0]?.shippingMark && <span style={{ fontSize: 13, background: '#fef2f2', color: '#ef4444', padding: '1px 8px', borderRadius: 20, fontWeight: 700 }}>🏷️ 一般麥頭</span>}
+                    {list[0]?.colorMark && <span style={{ fontSize: 13, background: '#fdf4ff', color: '#7e22ce', padding: '1px 8px', borderRadius: 20, fontWeight: 700 }}>🎨 彩色麥頭{list[0]?.colorMarkNote ? `(${list[0].colorMarkNote})` : ''}</span>}
                   </div>
                   <span style={{ fontSize: 14, background: '#f1f5f9', color: '#64748b', padding: '3px 10px', borderRadius: 20, fontWeight: 700 }}>{list[0]?.logistics || '物流未定'}</span>
                 </div>
                 {list.map(o => {
-                  const basis = getNormalBasis(o.itemName)
-                  const packCount = Math.round((Number(o.quantity)*Number(o.piecesPerUnit))/basis)
-                  const ipb = Math.round(Number(o.itemsPerBox))||0
+                  const ipb = Math.round(Number(o.itemsPerBox)) || 0
                   let boxDisplay = ''
-                  if (ipb > 0) { const boxes=Math.floor(Number(o.quantity)/ipb),rem=Number(o.quantity)%ipb; boxDisplay=`${boxes} 箱${rem>0?` + ${rem} 袋`:''}` }
+                  if (ipb > 0) { const boxes = Math.floor(Number(o.quantity) / ipb), rem = Number(o.quantity) % ipb; boxDisplay = `${boxes} 箱${rem > 0 ? ` + ${rem} 袋` : ''}` }
                   return (
                     <div key={o.id} style={{ padding: '16px', borderBottom: `1px solid #f8fafc` }}>
                       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 10 }}>
                         <div style={{ flex: 1, paddingRight: 12 }}>
                           <div style={{ fontSize: 18, fontWeight: 900, color: th.accent, marginBottom: 4 }}>{o.itemName}</div>
                           <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap' }}>
-                            {o.isMixedBox && <span style={{ fontSize: 15, background: '#fef3c7', color: '#92400e', padding: '2px 8px', borderRadius: 6, fontWeight: 700 }}>併箱裝</span>}
-                            <span style={{ fontSize: 15, background: '#f1f5f9', color: '#64748b', padding: '2px 8px', borderRadius: 6, fontWeight: 700 }}>{o.piecesPerUnit}{o.itemName?.includes('香羹')?'kg':'顆'}/袋</span>
+                            {o.isMixedBox && <span style={{ fontSize: 13, background: '#fef3c7', color: '#92400e', padding: '2px 8px', borderRadius: 6, fontWeight: 700 }}>併箱裝</span>}
+                            <span style={{ fontSize: 13, background: '#f1f5f9', color: '#64748b', padding: '2px 8px', borderRadius: 6, fontWeight: 700 }}>{o.weightPerBag || o.piecesPerUnit || 5250}g/袋</span>
                           </div>
                         </div>
                         <div style={{ textAlign: 'right' }}>
-                          <div style={{ fontSize: 28, fontWeight: 900, color: '#1e293b' }}>{o.quantity} <span style={{ fontSize: 15, color: '#94a3b8' }}>{o.unit}</span></div>
-                          <div style={{ fontSize: 15, fontWeight: 700, marginTop: 4, padding: '3px 8px', borderRadius: 6, display: 'inline-block', background: th.bg, color: th.accent }}>= {packCount} 包正常量</div>
+                          <div style={{ fontSize: 28, fontWeight: 900, color: '#1e293b' }}>{o.quantity} <span style={{ fontSize: 15, color: '#94a3b8' }}>袋</span></div>
+                          {o.boxCount > 0 && <div style={{ fontSize: 13, color: '#64748b' }}>{o.boxCount}箱 × {o.boxQtyEach}袋</div>}
                         </div>
                       </div>
                       <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 10 }}>
-                        {ipb > 0 && <div style={{ background: '#f0fdf4', padding: '4px 10px', borderRadius: 8, color: '#166534', fontSize: 15, fontWeight: 700 }}>📦 {boxDisplay}</div>}
-                        {o.boxType && <div style={{ background: '#eff6ff', padding: '4px 10px', borderRadius: 8, color: '#1d4ed8', fontSize: 15, fontWeight: 700 }}>外箱：{o.boxType}</div>}
-                        {o.notes && <div style={{ background: '#f8fafc', padding: '4px 10px', borderRadius: 8, color: '#475569', fontSize: 15, fontWeight: 700, flex: 1 }}>📝 {o.notes}</div>}
+                        {ipb > 0 && <div style={{ background: '#f0fdf4', padding: '4px 10px', borderRadius: 8, color: '#166534', fontSize: 13, fontWeight: 700 }}>📦 {boxDisplay}</div>}
+                        {o.boxType && <div style={{ background: '#eff6ff', padding: '4px 10px', borderRadius: 8, color: '#1d4ed8', fontSize: 13, fontWeight: 700 }}>外箱：{o.boxType}</div>}
+                        {o.notes && <div style={{ background: '#f8fafc', padding: '4px 10px', borderRadius: 8, color: '#475569', fontSize: 13, fontWeight: 700, flex: 1 }}>📝 {o.notes}</div>}
                       </div>
                       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', paddingTop: 10, borderTop: '1px dashed #f1f5f9' }}>
-                        <div style={{ fontSize: 15, color: '#94a3b8' }}>
+                        <div style={{ fontSize: 13, color: '#94a3b8' }}>
                           <div>排程：{o.scheduledDate || '未定'}</div>
                           <div style={{ fontWeight: 700, color: th.accent }}>出貨：{o.targetDate || '未定'}</div>
                         </div>
                         <div style={{ display: 'flex', gap: 4 }}>
                           <button onClick={() => openEditForm(o)} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 16, color: '#94a3b8', padding: '4px 6px' }}>✏️</button>
                           <button onClick={() => deleteOrder(o.id)} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 16, color: '#94a3b8', padding: '4px 6px' }}>🗑️</button>
-                          <button onClick={() => changeStatus(o, -1)} disabled={o.status==='pending'} style={{ background: '#fff', border: '1px solid #e2e8f0', borderRadius: 8, cursor: 'pointer', padding: '4px 8px', color: o.status==='pending'?'#e2e8f0':'#475569' }}>‹</button>
+                          <button onClick={() => changeStatus(o, -1)} disabled={o.status === 'pending'} style={{ background: '#fff', border: '1px solid #e2e8f0', borderRadius: 8, cursor: 'pointer', padding: '4px 8px', color: o.status === 'pending' ? '#e2e8f0' : '#475569' }}>‹</button>
                           <button onClick={() => changeStatus(o, 1)} style={{ background: th.header, color: '#fff', border: 'none', borderRadius: 8, cursor: 'pointer', padding: '6px 14px', fontWeight: 700, fontSize: 15 }}>
-                            {o.status==='pending'?'排入行程':o.status==='scheduled'?'完成備貨':o.status==='prepared'?'確認出貨':'維持現狀'} ›
+                            {o.status === 'pending' ? '排入行程' : o.status === 'scheduled' ? '完成備貨' : o.status === 'prepared' ? '確認出貨' : '維持現狀'} ›
                           </button>
                         </div>
                       </div>
@@ -256,20 +292,19 @@ export default function OrdersPage({ user }) {
               </div>
             ))
         ) : (
-          /* 日曆統計 */
           <div>
             <div style={{ background: '#fff', borderRadius: 24, padding: 20, marginBottom: 12 }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-                <button onClick={() => setCurrentMonth(new Date(currentMonth.setMonth(currentMonth.getMonth()-1)))} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 18, color: th.header }}>‹</button>
-                <div style={{ fontWeight: 900, fontSize: 16 }}>{currentMonth.getFullYear()}年 {currentMonth.getMonth()+1}月</div>
-                <button onClick={() => setCurrentMonth(new Date(currentMonth.setMonth(currentMonth.getMonth()+1)))} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 18, color: th.header }}>›</button>
+                <button onClick={() => setCurrentMonth(new Date(currentMonth.getFullYear(), currentMonth.getMonth() - 1))} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 18, color: th.header }}>‹</button>
+                <div style={{ fontWeight: 900, fontSize: 16 }}>{currentMonth.getFullYear()}年 {currentMonth.getMonth() + 1}月</div>
+                <button onClick={() => setCurrentMonth(new Date(currentMonth.getFullYear(), currentMonth.getMonth() + 1))} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 18, color: th.header }}>›</button>
               </div>
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7,1fr)', gap: 4, textAlign: 'center' }}>
-                {['日','一','二','三','四','五','六'].map(d => <div key={d} style={{ fontSize: 14, color: '#94a3b8', paddingBottom: 4 }}>{d}</div>)}
+                {['日', '一', '二', '三', '四', '五', '六'].map(d => <div key={d} style={{ fontSize: 14, color: '#94a3b8', paddingBottom: 4 }}>{d}</div>)}
                 {calendarData.map((d, i) => {
                   if (!d) return <div key={`e${i}`}></div>
                   const ds = formatDate(d), isSel = selectedDate && ds === formatDate(selectedDate)
-                  const hasOrders = orders.filter(o => o.targetDate===ds).length > 0
+                  const hasOrders = orders.filter(o => o.targetDate === ds).length > 0
                   return (
                     <button key={ds} onClick={() => setSelectedDate(d)} style={{ aspectRatio: '1', borderRadius: 12, border: 'none', cursor: 'pointer', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', background: isSel ? th.header : 'transparent', color: isSel ? '#fff' : '#1e293b', fontWeight: isSel ? 900 : 400 }}>
                       <span style={{ fontSize: 15 }}>{d.getDate()}</span>
@@ -282,14 +317,11 @@ export default function OrdersPage({ user }) {
             {selectedDate && (
               <>
                 <div style={{ background: th.header, borderRadius: 20, padding: 20, marginBottom: 12, color: '#fff' }}>
-                  <div style={{ fontWeight: 900, fontSize: 15, marginBottom: 12, borderBottom: 'rgba(255,255,255,.3) solid 1px', paddingBottom: 8 }}>每週領料總計（{formatDate(nextWeek.start)} ~ {formatDate(nextWeek.end)}）</div>
+                  <div style={{ fontWeight: 900, fontSize: 15, marginBottom: 12, borderBottom: 'rgba(255,255,255,.3) solid 1px', paddingBottom: 8 }}>每週出貨總計（{formatDate(nextWeek.start)} ~ {formatDate(nextWeek.end)}）</div>
                   {Object.entries(nextWeekSummary).map(([name, data]) => (
                     <div key={name} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: 'rgba(255,255,255,.1)', padding: '10px 12px', borderRadius: 12, marginBottom: 6 }}>
                       <span style={{ fontWeight: 700 }}>{name}</span>
-                      <div style={{ textAlign: 'right' }}>
-                        <div style={{ fontWeight: 900, fontSize: 18 }}>{data.qty} <span style={{ fontSize: 14 }}>{data.unit}</span></div>
-                        <div style={{ fontSize: 15, background: '#fff', color: th.header, padding: '1px 6px', borderRadius: 4, display: 'inline-block', marginTop: 2 }}>= {Math.round(data.pieces/getNormalBasis(name))} 包量</div>
-                      </div>
+                      <div style={{ fontWeight: 900, fontSize: 18 }}>{data.qty} <span style={{ fontSize: 14 }}>袋</span></div>
                     </div>
                   ))}
                   {Object.keys(nextWeekSummary).length === 0 && <p style={{ textAlign: 'center', opacity: .6, fontSize: 15 }}>無紀錄</p>}
@@ -299,13 +331,17 @@ export default function OrdersPage({ user }) {
                   {Object.entries(customerSummary).map(([name, data]) => (
                     <div key={name} style={{ border: '1px solid #f1f5f9', borderRadius: 16, overflow: 'hidden', marginBottom: 10 }}>
                       <div style={{ background: '#f8fafc', padding: '8px 14px', display: 'flex', justifyContent: 'space-between', fontWeight: 700, fontSize: 15 }}>
-                        <div>{name} {data.items[0]?.shippingMark && <span style={{ fontSize: 9, background: '#fef2f2', color: '#ef4444', padding: '1px 5px', borderRadius: 4 }}>標</span>}</div>
-                        <span>{data.totalBags} 袋</span>
+                        <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                          {name}
+                          {data.items[0]?.shippingMark && <span style={{ fontSize: 11, background: '#fef2f2', color: '#ef4444', padding: '1px 5px', borderRadius: 4 }}>一般麥頭</span>}
+                          {data.items[0]?.colorMark && <span style={{ fontSize: 11, background: '#fdf4ff', color: '#7e22ce', padding: '1px 5px', borderRadius: 4 }}>彩色麥頭{data.items[0]?.colorMarkNote ? `(${data.items[0].colorMarkNote})` : ''}</span>}
+                        </div>
+                        <span>{data.totalQty} 袋</span>
                       </div>
                       {data.items.map(item => (
                         <div key={item.id} style={{ padding: '8px 14px', display: 'flex', justifyContent: 'space-between', borderTop: '1px solid #f8fafc', fontSize: 15 }}>
                           <span style={{ color: '#475569' }}>{item.itemName}</span>
-                          <span style={{ color: th.header, fontWeight: 700 }}>{item.quantity} {item.unit}</span>
+                          <span style={{ color: th.header, fontWeight: 700 }}>{item.quantity} 袋</span>
                         </div>
                       ))}
                     </div>
@@ -323,17 +359,12 @@ export default function OrdersPage({ user }) {
         <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,.6)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 50, padding: 16 }}>
           <div style={{ background: '#fff', width: '100%', maxWidth: 420, borderRadius: 28, padding: 24, maxHeight: '85vh', overflowY: 'auto' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16, borderBottom: '1px solid #f1f5f9', paddingBottom: 12 }}>
-              <h2 style={{ fontSize: 16, fontWeight: 900 }}>口味品名與基準管理</h2>
+              <h2 style={{ fontSize: 16, fontWeight: 900 }}>口味品名管理</h2>
               <button onClick={() => setIsSettingsOpen(false)} style={{ background: '#f1f5f9', border: 'none', borderRadius: '50%', width: 32, height: 32, cursor: 'pointer', fontSize: 14 }}>✕</button>
             </div>
             {editingConfigs.map((item, i) => (
               <div key={i} style={{ background: '#f8fafc', padding: 12, borderRadius: 12, marginBottom: 8 }}>
-                <input type="text" value={item.newName} onChange={e => { const n=[...editingConfigs]; n[i].newName=e.target.value; setEditingConfigs(n) }} style={{ width: '100%', background: '#fff', border: '1px solid #e2e8f0', borderRadius: 8, padding: '6px 10px', fontWeight: 700, color: '#4f46e5', marginBottom: 6, fontFamily: 'inherit' }} />
-                <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-                  <span style={{ fontSize: 14, color: '#94a3b8' }}>零售基準：</span>
-                  <input type="number" step="0.1" value={item.basis} onChange={e => { const n=[...editingConfigs]; n[i].basis=e.target.value; setEditingConfigs(n) }} style={{ flex: 1, border: '1px solid #e2e8f0', borderRadius: 8, padding: '6px', textAlign: 'center', fontWeight: 700, color: '#ef4444', fontFamily: 'inherit' }} />
-                  <span style={{ fontSize: 14, color: '#94a3b8' }}>{item.newName?.includes('香羹')?'kg/包':'顆/包'}</span>
-                </div>
+                <input type="text" value={item.newName} onChange={e => { const n = [...editingConfigs]; n[i].newName = e.target.value; setEditingConfigs(n) }} style={{ width: '100%', background: '#fff', border: '1px solid #e2e8f0', borderRadius: 8, padding: '6px 10px', fontWeight: 700, color: '#4f46e5', fontFamily: 'inherit' }} />
               </div>
             ))}
             <button onClick={syncSettings} style={{ width: '100%', padding: '12px', background: '#1e293b', color: '#fff', border: 'none', borderRadius: 16, fontWeight: 900, fontSize: 15, cursor: 'pointer', marginTop: 8 }}>確認並同步選單</button>
@@ -348,15 +379,25 @@ export default function OrdersPage({ user }) {
             <h2 style={{ fontSize: 16, fontWeight: 900, color: '#3730a3', marginBottom: 16, borderBottom: '1px solid #f1f5f9', paddingBottom: 12 }}>🛡️ 請確認訂單內容</h2>
             <div style={{ background: '#f8fafc', borderRadius: 12, padding: 16, marginBottom: 16 }}>
               <div style={{ fontSize: 15, color: '#64748b', marginBottom: 4 }}>客戶：<strong style={{ color: '#1e293b' }}>{pendingOrderData.customerName}</strong></div>
-              <div style={{ fontSize: 15, color: '#64748b', marginBottom: 12 }}>品項：<strong style={{ color: '#4f46e5' }}>{pendingOrderData.itemName}</strong></div>
+              <div style={{ fontSize: 15, color: '#64748b', marginBottom: 4 }}>品項：<strong style={{ color: '#4f46e5' }}>{pendingOrderData.itemName}</strong></div>
+              <div style={{ fontSize: 15, color: '#64748b', marginBottom: 12 }}>出貨日：<strong style={{ color: '#dc2626' }}>{pendingOrderData.targetDate}</strong></div>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', borderTop: '1px solid #e2e8f0', paddingTop: 10 }}>
-                <div><div style={{ fontSize: 14, color: '#94a3b8' }}>訂購數量</div><div style={{ fontSize: 28, fontWeight: 900 }}>{pendingOrderData.quantity} <span style={{ fontSize: 15, color: '#94a3b8' }}>{pendingOrderData.unit}</span></div></div>
-                <div style={{ textAlign: 'right' }}><div style={{ fontSize: 15, color: '#94a3b8' }}>實裝量</div><div style={{ fontSize: 15, fontWeight: 700, color: '#ef4444' }}>{pendingOrderData.piecesPerUnit}{pendingOrderData.itemName?.includes('香羹')?'kg':'顆'}/袋</div></div>
+                <div>
+                  <div style={{ fontSize: 14, color: '#94a3b8' }}>訂購數量</div>
+                  <div style={{ fontSize: 28, fontWeight: 900 }}>{pendingOrderData.quantity} <span style={{ fontSize: 15, color: '#94a3b8' }}>袋</span></div>
+                  {pendingOrderData.boxCount > 0 && <div style={{ fontSize: 13, color: '#64748b' }}>{pendingOrderData.boxCount}箱 × {pendingOrderData.boxQtyEach}袋</div>}
+                </div>
+                <div style={{ textAlign: 'right' }}>
+                  <div style={{ fontSize: 14, color: '#94a3b8' }}>每袋重量</div>
+                  <div style={{ fontSize: 16, fontWeight: 700, color: '#ef4444' }}>{pendingOrderData.weightPerBag}g</div>
+                </div>
               </div>
             </div>
-            <div style={{ display: 'flex', gap: 6, marginBottom: 12 }}>
-              <div style={{ flex: 1, background: '#eff6ff', borderRadius: 10, padding: '8px', fontSize: 14, fontWeight: 700, color: '#1d4ed8' }}>📦 {pendingOrderData.boxType||'外箱未選'}</div>
-              <div style={{ flex: 1, background: '#f0fdf4', borderRadius: 10, padding: '8px', fontSize: 14, fontWeight: 700, color: '#166534' }}>🔢 {pendingOrderData.itemsPerBox||'箱入未定'}</div>
+            <div style={{ display: 'flex', gap: 6, marginBottom: 12, flexWrap: 'wrap' }}>
+              {pendingOrderData.boxType && <div style={{ flex: 1, background: '#eff6ff', borderRadius: 10, padding: '8px', fontSize: 14, fontWeight: 700, color: '#1d4ed8', minWidth: 80 }}>📦 {pendingOrderData.boxType}</div>}
+              {pendingOrderData.itemsPerBox > 0 && <div style={{ flex: 1, background: '#f0fdf4', borderRadius: 10, padding: '8px', fontSize: 14, fontWeight: 700, color: '#166534', minWidth: 80 }}>每箱 {pendingOrderData.itemsPerBox} 袋</div>}
+              {pendingOrderData.shippingMark && <div style={{ flex: 1, background: '#fef2f2', borderRadius: 10, padding: '8px', fontSize: 14, fontWeight: 700, color: '#dc2626', minWidth: 80 }}>🏷️ 一般麥頭</div>}
+              {pendingOrderData.colorMark && <div style={{ flex: 1, background: '#fdf4ff', borderRadius: 10, padding: '8px', fontSize: 14, fontWeight: 700, color: '#7e22ce', minWidth: 80 }}>🎨 彩色麥頭{pendingOrderData.colorMarkNote ? `(${pendingOrderData.colorMarkNote})` : ''}</div>}
             </div>
             <button onClick={executeSave} style={{ width: '100%', padding: '12px', background: '#059669', color: '#fff', border: 'none', borderRadius: 16, fontWeight: 900, fontSize: 15, cursor: 'pointer', marginBottom: 8 }}>確認無誤，正式存檔</button>
             <button onClick={() => setIsConfirmOpen(false)} style={{ width: '100%', padding: '10px', background: '#f1f5f9', color: '#64748b', border: 'none', borderRadius: 16, fontWeight: 700, cursor: 'pointer' }}>返回修改</button>
@@ -364,38 +405,84 @@ export default function OrdersPage({ user }) {
         </div>
       )}
 
-      {/* 表單 */}
+      {/* 新增/編輯表單 */}
       {isFormOpen && (
-        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,.6)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 50, padding: 16, overflowY: 'auto' }}>
-          <form onSubmit={handleFormSubmit} style={{ background: '#fff', width: '100%', maxWidth: 440, borderRadius: 28, padding: 24, boxShadow: '0 20px 60px rgba(0,0,0,.2)', position: 'relative' }}>
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,.6)', zIndex: 50, overflowY: 'auto', padding: '16px 16px 40px' }}>
+          <form onSubmit={handleFormSubmit} style={{ background: '#fff', width: '100%', maxWidth: 440, borderRadius: 28, padding: 24, boxShadow: '0 20px 60px rgba(0,0,0,.2)', margin: '0 auto' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16, borderBottom: '1px solid #f1f5f9', paddingBottom: 12 }}>
               <h2 style={{ fontSize: 16, fontWeight: 900 }}>{editingOrderId ? '修改訂單' : '新增排程訂單'}</h2>
               <button type="button" onClick={closeForm} style={{ background: '#f8fafc', border: 'none', borderRadius: '50%', width: 32, height: 32, cursor: 'pointer' }}>✕</button>
             </div>
+
+            {/* 錯誤提示 */}
+            {formError && (
+              <div style={{ background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 10, padding: '10px 14px', marginBottom: 12, color: '#dc2626', fontWeight: 700, fontSize: 14 }}>
+                ⚠️ {formError}
+              </div>
+            )}
+
+            {/* 客戶名稱 */}
             <div style={{ marginBottom: 12 }}>
               <div style={{ fontSize: 14, color: '#94a3b8', fontWeight: 700, marginBottom: 4 }}>客戶名稱 *</div>
-              <input type="text" name="customerName" required value={formData.customerName} onChange={handleInputChange} style={{ width: '100%', background: '#f8fafc', border: 'none', borderRadius: 12, padding: '12px 14px', fontSize: 15, fontWeight: 700, fontFamily: 'inherit' }} placeholder="例如：麗合-本院" />
+              <input type="text" name="customerName" value={formData.customerName} onChange={handleInputChange} style={{ width: '100%', background: '#f8fafc', border: 'none', borderRadius: 12, padding: '12px 14px', fontSize: 15, fontWeight: 700, fontFamily: 'inherit' }} placeholder="例如：麗合-本院" />
             </div>
+
+            {/* 日期 */}
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 12 }}>
-              <div><div style={{ fontSize: 14, color: '#059669', fontWeight: 700, marginBottom: 4 }}>排程生產日</div><input type="date" name="scheduledDate" value={formData.scheduledDate} onChange={handleInputChange} style={{ width: '100%', background: '#f0fdf4', border: 'none', borderRadius: 12, padding: '10px', fontFamily: 'inherit' }} /></div>
-              <div><div style={{ fontSize: 14, color: '#ef4444', fontWeight: 700, marginBottom: 4 }}>指定出貨日</div><input type="date" name="targetDate" value={formData.targetDate} onChange={handleInputChange} style={{ width: '100%', background: '#fef2f2', border: 'none', borderRadius: 12, padding: '10px', fontFamily: 'inherit' }} /></div>
+              <div>
+                <div style={{ fontSize: 14, color: '#059669', fontWeight: 700, marginBottom: 4 }}>排程生產日</div>
+                <input type="date" name="scheduledDate" value={formData.scheduledDate} onChange={handleInputChange} style={{ width: '100%', background: '#f0fdf4', border: 'none', borderRadius: 12, padding: '10px', fontFamily: 'inherit' }} />
+              </div>
+              <div>
+                <div style={{ fontSize: 14, color: '#ef4444', fontWeight: 700, marginBottom: 4 }}>指定出貨日 *</div>
+                <input type="date" name="targetDate" value={formData.targetDate} onChange={handleInputChange} style={{ width: '100%', background: '#fef2f2', border: 'none', borderRadius: 12, padding: '10px', fontFamily: 'inherit' }} />
+              </div>
             </div>
+
+            {/* 物流與裝箱 */}
             <div style={{ background: '#eef2ff', borderRadius: 16, padding: 14, marginBottom: 12 }}>
               <div style={{ fontSize: 14, fontWeight: 700, color: '#4f46e5', marginBottom: 10 }}>🚛 理貨與裝箱資訊</div>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 8 }}>
-                <div><div style={{ fontSize: 15, color: '#6366f1', marginBottom: 3 }}>物流方式</div><select name="logistics" value={formData.logistics} onChange={handleInputChange} style={{ width: '100%', background: '#fff', border: 'none', borderRadius: 10, padding: '8px', fontFamily: 'inherit', appearance: 'none' }}><option value="">請選擇</option><option>黑貓</option><option>新竹</option><option>大榮</option></select></div>
-                <div><div style={{ fontSize: 15, color: '#6366f1', marginBottom: 3 }}>外箱規格</div><select name="boxType" value={formData.boxType} onChange={handleInputChange} style={{ width: '100%', background: '#fff', border: 'none', borderRadius: 10, padding: '8px', fontFamily: 'inherit', appearance: 'none' }}><option value="">請選擇</option><option>大紙箱</option><option>中紙箱</option><option>大紙箱(空白)</option><option>中紙箱(空白)</option><option>中箱專用箱</option></select></div>
+                <div>
+                  <div style={{ fontSize: 13, color: '#6366f1', marginBottom: 3 }}>物流方式</div>
+                  <select name="logistics" value={formData.logistics} onChange={handleInputChange} style={{ width: '100%', background: '#fff', border: 'none', borderRadius: 10, padding: '8px', fontFamily: 'inherit', appearance: 'none' }}>
+                    <option value="">請選擇</option>
+                    <option>黑貓</option><option>新竹</option><option>大榮</option><option>自取</option>
+                  </select>
+                </div>
+                <div>
+                  <div style={{ fontSize: 13, color: '#6366f1', marginBottom: 3 }}>外箱規格</div>
+                  <select name="boxType" value={formData.boxType} onChange={handleInputChange} style={{ width: '100%', background: '#fff', border: 'none', borderRadius: 10, padding: '8px', fontFamily: 'inherit', appearance: 'none' }}>
+                    <option value="">請選擇</option>
+                    <option>大紙箱</option><option>中紙箱</option><option>大紙箱(空白)</option><option>中紙箱(空白)</option><option>中箱專用箱</option>
+                  </select>
+                </div>
               </div>
-              <div style={{ marginBottom: 8 }}><div style={{ fontSize: 15, color: '#6366f1', marginBottom: 3 }}>箱入數（每箱幾袋）</div><input type="number" name="itemsPerBox" value={formData.itemsPerBox} onChange={handleInputChange} style={{ width: '100%', background: '#fff', border: 'none', borderRadius: 10, padding: '8px', fontFamily: 'inherit' }} placeholder="例如：5" /></div>
-              <label style={{ display: 'flex', alignItems: 'center', gap: 8, background: '#fff', padding: '8px 10px', borderRadius: 10, cursor: 'pointer' }}>
-                <input type="checkbox" name="shippingMark" checked={formData.shippingMark} onChange={handleInputChange} style={{ width: 18, height: 18 }} />
-                <span style={{ fontSize: 15, fontWeight: 700, color: '#ef4444' }}>外箱需貼麥頭標誌</span>
-              </label>
+              <div style={{ marginBottom: 8 }}>
+                <div style={{ fontSize: 13, color: '#6366f1', marginBottom: 3 }}>箱入數（每箱幾袋）</div>
+                <input type="number" name="itemsPerBox" value={formData.itemsPerBox} onChange={handleInputChange} style={{ width: '100%', background: '#fff', border: 'none', borderRadius: 10, padding: '8px', fontFamily: 'inherit' }} placeholder="例如：5" />
+              </div>
+              {/* 麥頭複選 */}
+              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 6, background: '#fff', padding: '7px 10px', borderRadius: 10, cursor: 'pointer', flex: 1 }}>
+                  <input type="checkbox" name="shippingMark" checked={formData.shippingMark} onChange={handleInputChange} style={{ width: 16, height: 16 }} />
+                  <span style={{ fontSize: 13, fontWeight: 700, color: '#ef4444' }}>🏷️ 一般麥頭</span>
+                </label>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 6, background: '#fff', padding: '7px 10px', borderRadius: 10, cursor: 'pointer', flex: 1 }}>
+                  <input type="checkbox" name="colorMark" checked={formData.colorMark} onChange={handleInputChange} style={{ width: 16, height: 16 }} />
+                  <span style={{ fontSize: 13, fontWeight: 700, color: '#7e22ce' }}>🎨 彩色麥頭</span>
+                </label>
+              </div>
+              {formData.colorMark && (
+                <input type="text" name="colorMarkNote" value={formData.colorMarkNote} onChange={handleInputChange} placeholder="顏色說明（例：紅色、藍色）" style={{ width: '100%', background: '#fff', border: 'none', borderRadius: 10, padding: '8px 10px', fontFamily: 'inherit', marginTop: 6, fontSize: 13 }} />
+              )}
             </div>
+
+            {/* 口味 */}
             <div style={{ marginBottom: 12 }}>
               <div style={{ fontSize: 14, color: '#94a3b8', fontWeight: 700, marginBottom: 4 }}>口味品項規格 *</div>
               <div style={{ display: 'flex', gap: 6 }}>
-                <select name="itemName" required value={formData.itemName} onChange={handleInputChange} style={{ flex: 1, background: '#f8fafc', border: 'none', borderRadius: 12, padding: '12px 14px', fontWeight: 700, fontFamily: 'inherit', appearance: 'none' }}>
+                <select name="itemName" value={formData.itemName} onChange={handleInputChange} style={{ flex: 1, background: '#f8fafc', border: 'none', borderRadius: 12, padding: '12px 14px', fontWeight: 700, fontFamily: 'inherit', appearance: 'none' }}>
                   <option value="">請選擇規格</option>
                   {savedItems.map(f => <option key={f} value={f}>{f}</option>)}
                 </select>
@@ -406,34 +493,62 @@ export default function OrdersPage({ user }) {
               <div style={{ display: 'flex', gap: 6, background: '#fffbeb', padding: 10, borderRadius: 12, marginBottom: 12 }}>
                 <input type="text" value={newItemName} onChange={e => setNewItemName(e.target.value)} placeholder="新規格名稱..." style={{ flex: 1, border: 'none', background: '#fff', borderRadius: 8, padding: '6px 10px', fontFamily: 'inherit' }} />
                 <button type="button" onClick={saveNewFlavor} style={{ background: '#d97706', color: '#fff', border: 'none', borderRadius: 8, padding: '0 12px', fontWeight: 700, cursor: 'pointer' }}>存</button>
-                <button type="button" onClick={() => setIsAddingNewItem(false)} style={{ color: '#94a3b8', fontWeight: 700, border: 'none', background: 'none', cursor: 'pointer', padding: '0 6px' }}>✕</button>
+                <button type="button" onClick={() => setIsAddingNewItem(false)} style={{ color: '#94a3b8', fontWeight: 700, border: 'none', background: 'none', cursor: 'pointer' }}>✕</button>
               </div>
             )}
-            <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
-              <div style={{ flex: 2 }}><div style={{ fontSize: 14, color: '#94a3b8', fontWeight: 700, marginBottom: 4 }}>訂購數量 *</div><input type="number" name="quantity" required value={formData.quantity} onChange={handleInputChange} style={{ width: '100%', background: '#f8fafc', border: 'none', borderRadius: 12, padding: '12px', fontSize: 20, fontWeight: 900, textAlign: 'center', fontFamily: 'inherit' }} /></div>
-              <div style={{ flex: 1 }}><div style={{ fontSize: 14, color: '#94a3b8', fontWeight: 700, marginBottom: 4 }}>單位</div><select name="unit" value={formData.unit} onChange={handleInputChange} style={{ width: '100%', background: '#f8fafc', border: 'none', borderRadius: 12, padding: '12px', fontWeight: 700, textAlign: 'center', fontFamily: 'inherit', appearance: 'none' }}><option>袋</option><option>包</option></select></div>
-            </div>
+
+            {/* 數量：兩種模式切換 */}
             <div style={{ marginBottom: 12 }}>
-              <div style={{ fontSize: 14, color: '#ef4444', fontWeight: 700, marginBottom: 4 }}>{formData.itemName?.includes('香羹') ? '實裝重量(kg)/袋' : '實裝顆數/袋'} *</div>
-              <input type="number" step="0.1" name="piecesPerUnit" required value={formData.piecesPerUnit} onChange={handleInputChange} style={{ width: '100%', background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 12, padding: '12px', fontSize: 16, fontWeight: 900, color: '#ef4444', textAlign: 'center', fontFamily: 'inherit' }} />
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                <div style={{ fontSize: 14, color: '#94a3b8', fontWeight: 700 }}>訂購數量 *</div>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, color: '#6366f1', cursor: 'pointer' }}>
+                  <input type="checkbox" checked={useBoxCalc} onChange={e => { setUseBoxCalc(e.target.checked); setBoxCount(''); setBoxQty('') }} style={{ width: 14, height: 14 }} />
+                  用箱數換算
+                </label>
+              </div>
+              {useBoxCalc ? (
+                <div>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr auto 1fr auto 1fr', gap: 6, alignItems: 'center', marginBottom: 6 }}>
+                    <input type="number" value={boxCount} onChange={e => setBoxCount(e.target.value)} placeholder="箱數" style={{ background: '#f8fafc', border: 'none', borderRadius: 10, padding: '10px', fontSize: 16, fontWeight: 700, textAlign: 'center', fontFamily: 'inherit' }} />
+                    <span style={{ color: '#94a3b8', textAlign: 'center', fontSize: 14 }}>箱 ×</span>
+                    <input type="number" value={boxQty} onChange={e => setBoxQty(e.target.value)} placeholder="每箱袋數" style={{ background: '#f8fafc', border: 'none', borderRadius: 10, padding: '10px', fontSize: 16, fontWeight: 700, textAlign: 'center', fontFamily: 'inherit' }} />
+                    <span style={{ color: '#94a3b8', textAlign: 'center', fontSize: 14 }}>袋 =</span>
+                    <div style={{ background: '#ecfdf5', borderRadius: 10, padding: '10px', fontSize: 18, fontWeight: 900, textAlign: 'center', color: '#059669' }}>{calcedQty || '?'}</div>
+                  </div>
+                  <div style={{ fontSize: 12, color: '#94a3b8', textAlign: 'center' }}>總計 {calcedQty} 袋</div>
+                </div>
+              ) : (
+                <input type="number" name="quantity" value={formData.quantity} onChange={handleInputChange} placeholder="袋數" style={{ width: '100%', background: '#f8fafc', border: 'none', borderRadius: 12, padding: '12px', fontSize: 20, fontWeight: 900, textAlign: 'center', fontFamily: 'inherit' }} />
+              )}
             </div>
+
+            {/* 每袋重量 */}
+            <div style={{ marginBottom: 12 }}>
+              <div style={{ fontSize: 14, color: '#ef4444', fontWeight: 700, marginBottom: 4 }}>每袋重量(g) *</div>
+              <input type="number" name="weightPerBag" value={formData.weightPerBag} onChange={handleInputChange} style={{ width: '100%', background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 12, padding: '12px', fontSize: 16, fontWeight: 900, color: '#ef4444', textAlign: 'center', fontFamily: 'inherit' }} />
+            </div>
+
+            {/* 備註 */}
             <div style={{ marginBottom: 12 }}>
               <div style={{ fontSize: 14, color: '#94a3b8', fontWeight: 700, marginBottom: 4 }}>特殊備註</div>
               <textarea name="notes" value={formData.notes} onChange={handleInputChange} rows="2" style={{ width: '100%', background: '#f8fafc', border: 'none', borderRadius: 12, padding: '10px 12px', fontFamily: 'inherit', resize: 'none' }} />
             </div>
+
+            {/* 併箱 */}
             <label style={{ display: 'flex', alignItems: 'flex-start', gap: 10, background: '#fffbeb', border: '1px solid #fde68a', borderRadius: 12, padding: 12, cursor: 'pointer', marginBottom: 16 }}>
               <input type="checkbox" name="isMixedBox" checked={formData.isMixedBox} onChange={handleInputChange} style={{ width: 18, height: 18, marginTop: 1 }} />
-              <span style={{ fontSize: 15, fontWeight: 700, color: '#92400e' }}>併箱口味（儲存後保留客戶與日期，方便輸入下一項）</span>
+              <span style={{ fontSize: 14, fontWeight: 700, color: '#92400e' }}>併箱口味（儲存後保留客戶與日期，方便輸入下一項）</span>
             </label>
+
             <div style={{ display: 'flex', gap: 8 }}>
               <button type="button" onClick={closeForm} style={{ flex: 1, padding: '12px', background: '#f1f5f9', border: 'none', borderRadius: 14, fontWeight: 700, color: '#64748b', cursor: 'pointer' }}>取消</button>
               {!editingOrderId && formData.isMixedBox ? (
                 <div style={{ flex: 2.5, display: 'flex', gap: 6 }}>
-                  <button type="submit" onClick={() => submitActionRef.current='continue'} style={{ flex: 1, padding: '12px', background: '#fef3c7', border: 'none', borderRadius: 14, fontWeight: 700, color: '#92400e', cursor: 'pointer', fontSize: 15 }}>儲存續打</button>
-                  <button type="submit" onClick={() => submitActionRef.current='finish'} style={{ flex: 1, padding: '12px', background: '#1e293b', color: '#fff', border: 'none', borderRadius: 14, fontWeight: 700, cursor: 'pointer', fontSize: 15 }}>完成裝箱</button>
+                  <button type="submit" onClick={() => { submitActionRef.current = 'continue' }} style={{ flex: 1, padding: '12px', background: '#fef3c7', border: 'none', borderRadius: 14, fontWeight: 700, color: '#92400e', cursor: 'pointer', fontSize: 14 }}>儲存續打</button>
+                  <button type="submit" onClick={() => { submitActionRef.current = 'finish' }} style={{ flex: 1, padding: '12px', background: '#1e293b', color: '#fff', border: 'none', borderRadius: 14, fontWeight: 700, cursor: 'pointer', fontSize: 14 }}>完成裝箱</button>
                 </div>
               ) : (
-                <button type="submit" onClick={() => submitActionRef.current='normal'} style={{ flex: 2.5, padding: '12px', background: '#1e293b', color: '#fff', border: 'none', borderRadius: 14, fontWeight: 900, cursor: 'pointer' }}>確認儲存</button>
+                <button type="submit" onClick={() => { submitActionRef.current = 'normal' }} style={{ flex: 2.5, padding: '12px', background: '#1e293b', color: '#fff', border: 'none', borderRadius: 14, fontWeight: 900, cursor: 'pointer' }}>確認儲存</button>
               )}
             </div>
           </form>
