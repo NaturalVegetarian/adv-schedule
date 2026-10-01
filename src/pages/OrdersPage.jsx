@@ -19,6 +19,8 @@ export default function OrdersPage({ user }) {
   const [toast, setToast] = useState(null)
   const [pendingOrderData, setPendingOrderData] = useState(null)
   const [formError, setFormError] = useState('')
+  const [statusModal, setStatusModal] = useState(null) // {order, nextStatus, label}
+  const [statusDate, setStatusDate] = useState('')
   const submitActionRef = useRef('normal')
   const [useBoxCalc, setUseBoxCalc] = useState(false)
   const [boxCountInput, setBoxCountInput] = useState('')
@@ -127,9 +129,10 @@ export default function OrdersPage({ user }) {
     const states = ['pending', 'scheduled', 'prepared', 'shipped']
     const idx = states.indexOf(order.status)
     const next = Math.max(0, Math.min(states.length - 1, idx + direction))
+    if (next === idx) return
     await supabase.from('adv_orders').update({ status: states[next], updated_at: new Date().toISOString() }).eq('id', order.id)
     fetchOrders()
-    showToast(`狀態更新：${['待安排', '已排程', '已備貨', '已出貨'][next]}`)
+    showToast(`已退回：${['待安排', '已排程', '已備貨', '已出貨'][next]} ✅`)
   }
 
   const closeForm = () => {
@@ -154,6 +157,7 @@ export default function OrdersPage({ user }) {
     if (!newItemName.trim()) return
     const items = [...savedItems, newItemName.trim()]
     await supabase.from('adv_flavor_config').upsert({ id: 'default', items, updated_at: new Date().toISOString() })
+    setSavedItems(items)
     setFormData(p => ({ ...p, item_name: newItemName.trim() }))
     setNewItemName(''); setIsAddingNewItem(false); showToast('規格新增成功 ✅')
   }
@@ -246,7 +250,12 @@ export default function OrdersPage({ user }) {
                 {/* 母客戶標題列 */}
                 <div style={{ background: th.header, padding: '10px 16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                   <span style={{ fontSize: 16, fontWeight: 900, color: '#fff' }}>{parentName}</span>
-                  <span style={{ fontSize: 13, color: 'rgba(255,255,255,.8)', fontWeight: 700 }}>共 {allOrders.length} 筆・{totalQty} 袋</span>
+<span style={{ fontSize: 13, color: 'rgba(255,255,255,.8)', fontWeight: 700 }}>{(() => {
+                    const totalPkg = totalQty
+                    const ipbVal = allOrders[0]?.items_per_box || allOrders[0]?.itemsPerBox || 0
+                    const totalBox = ipbVal > 0 ? Math.ceil(totalPkg / ipbVal) : 0
+                    return `共${allOrders.length}筆・${totalPkg}包${totalBox > 0 ? `・${totalBox}箱` : ''}`
+                  })()}</span>
                 </div>
                 {/* 各子客戶 */}
                 {Object.entries(subGroups).map(([subName, list]) => (
@@ -258,7 +267,15 @@ export default function OrdersPage({ user }) {
                         {list[0]?.shipping_mark && <span style={{ fontSize: 11, background: '#fef2f2', color: '#ef4444', padding: '1px 7px', borderRadius: 20, fontWeight: 700 }}>🏷️ 一般麥頭</span>}
                         {list[0]?.color_mark && <span style={{ fontSize: 11, background: '#fdf4ff', color: '#7e22ce', padding: '1px 7px', borderRadius: 20, fontWeight: 700 }}>🎨 彩色{list[0]?.color_mark_note ? `(${list[0].color_mark_note})` : ''}</span>}
                       </div>
-                      <span style={{ fontSize: 12, background: '#f1f5f9', color: '#64748b', padding: '2px 8px', borderRadius: 10, fontWeight: 700 }}>{list[0]?.logistics || '物流未定'}</span>
+<div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                        {(() => {
+                          const subQty = list.reduce((s,o) => s + Number(o.quantity), 0)
+                          const ipb2 = list[0]?.items_per_box || list[0]?.itemsPerBox || 0
+                          const subBox = ipb2 > 0 ? Math.ceil(subQty / ipb2) : 0
+                          return <span style={{ fontSize: 12, fontWeight: 700, color: th.accent }}>{subQty}包{subBox > 0 ? `・${subBox}箱` : ''}</span>
+                        })()}
+                        <span style={{ fontSize: 12, background: '#f1f5f9', color: '#64748b', padding: '2px 8px', borderRadius: 10, fontWeight: 700 }}>{list[0]?.logistics || '物流未定'}</span>
+                      </div>
                     </div>
                   )}
                 {list.map(o => {
@@ -293,8 +310,14 @@ export default function OrdersPage({ user }) {
                         <div style={{ display: 'flex', gap: 4 }}>
                           <button onClick={() => openEditForm(o)} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 16, color: '#94a3b8', padding: '4px 6px' }}>✏️</button>
                           <button onClick={() => deleteOrder(o.id)} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 16, color: '#94a3b8', padding: '4px 6px' }}>🗑️</button>
-                          <button onClick={() => changeStatus(o, -1)} disabled={o.status === 'pending'} style={{ background: '#fff', border: '1px solid #e2e8f0', borderRadius: 8, cursor: 'pointer', padding: '4px 8px', color: o.status === 'pending' ? '#e2e8f0' : '#475569' }}>‹</button>
-                          <button onClick={() => changeStatus(o, 1)} style={{ background: th.header, color: '#fff', border: 'none', borderRadius: 8, cursor: 'pointer', padding: '6px 14px', fontWeight: 700, fontSize: 14 }}>
+                          <button onClick={() => changeStatus(o, -1)} disabled={o.status === 'pending'} style={{ background: '#fff', border: '1px solid #e2e8f0', borderRadius: 8, cursor: 'pointer', padding: '4px 8px', fontSize: 11, color: o.status === 'pending' ? '#e2e8f0' : '#475569' }}>退回上一狀態</button>
+                          <button onClick={() => {
+                            if (o.status === 'shipped') return
+                            const labels = { pending: '排入行程', scheduled: '完成備貨', prepared: '確認出貨' }
+                            const nextStatuses = { pending: 'scheduled', scheduled: 'prepared', prepared: 'shipped' }
+                            setStatusDate(new Date().toISOString().slice(0,10))
+                            setStatusModal({ order: o, nextStatus: nextStatuses[o.status], label: labels[o.status] })
+                          }} style={{ background: th.header, color: '#fff', border: 'none', borderRadius: 8, cursor: 'pointer', padding: '6px 14px', fontWeight: 700, fontSize: 14 }}>
                             {o.status === 'pending' ? '排入行程' : o.status === 'scheduled' ? '完成備貨' : o.status === 'prepared' ? '確認出貨' : '維持現狀'} ›
                           </button>
                         </div>
@@ -308,7 +331,11 @@ export default function OrdersPage({ user }) {
                 {hasMultipleSub && (
                   <div style={{ background: '#f8fafc', padding: '10px 16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                     <span style={{ fontSize: 13, color: '#64748b', fontWeight: 700 }}>合計</span>
-                    <span style={{ fontSize: 15, fontWeight: 900, color: th.accent }}>{totalQty} 袋</span>
+  <span style={{ fontSize: 15, fontWeight: 900, color: th.accent }}>{(() => {
+                      const ipbF = allOrders[0]?.items_per_box || allOrders[0]?.itemsPerBox || 0
+                      const boxF = ipbF > 0 ? Math.ceil(totalQty / ipbF) : 0
+                      return `${totalQty} 包${boxF > 0 ? `・${boxF} 箱` : ''}`
+                    })()}</span>
                   </div>
                 )}
               </div>
@@ -396,6 +423,39 @@ export default function OrdersPage({ user }) {
         </div>
       )}
 
+      {/* 狀態日期 Modal */}
+      {statusModal && (
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,.7)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 120, padding: 16 }}>
+          <div style={{ background: '#fff', width: '100%', maxWidth: 320, borderRadius: 24, padding: 24 }}>
+            <h2 style={{ fontSize: 16, fontWeight: 900, marginBottom: 6 }}>{statusModal.label}</h2>
+            <div style={{ fontSize: 13, color: '#64748b', marginBottom: 16 }}>
+              {statusModal.order.customer_name || statusModal.order.customerName} ・ {statusModal.order.item_name || statusModal.order.itemName}
+            </div>
+            <div style={{ marginBottom: 16 }}>
+              <div style={{ fontSize: 13, color: '#94a3b8', fontWeight: 700, marginBottom: 6 }}>
+                {statusModal.nextStatus === 'scheduled' ? '排程生產日' : statusModal.nextStatus === 'prepared' ? '完成備貨日期' : '確認出貨日期'}
+              </div>
+              <input type="date" value={statusDate} onChange={e => setStatusDate(e.target.value)}
+                style={{ width: '100%', background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 12, padding: '10px', fontFamily: 'inherit', fontSize: 15 }} />
+            </div>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button onClick={() => setStatusModal(null)} style={{ flex: 1, padding: '11px', background: '#f1f5f9', border: 'none', borderRadius: 12, fontWeight: 700, color: '#64748b', cursor: 'pointer' }}>取消</button>
+              <button onClick={async () => {
+                const states = ['pending', 'scheduled', 'prepared', 'shipped']
+                const updateData = { status: statusModal.nextStatus, updated_at: new Date().toISOString() }
+                if (statusModal.nextStatus === 'scheduled') updateData.scheduled_date = statusDate
+                else if (statusModal.nextStatus === 'prepared') updateData.prepared_date = statusDate
+                else if (statusModal.nextStatus === 'shipped') updateData.target_date = statusDate
+                await supabase.from('adv_orders').update(updateData).eq('id', statusModal.order.id)
+                fetchOrders()
+                showToast(`${statusModal.label} ✅`)
+                setStatusModal(null)
+              }} style={{ flex: 2, padding: '11px', background: th.header, color: '#fff', border: 'none', borderRadius: 12, fontWeight: 900, cursor: 'pointer' }}>確認 {statusModal.label}</button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* 確認視窗 */}
       {isConfirmOpen && pendingOrderData && (
         <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,.7)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 110, padding: 16 }}>
@@ -434,7 +494,7 @@ export default function OrdersPage({ user }) {
         <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,.6)', zIndex: 50, overflowY: 'auto', padding: '16px 16px 60px' }}>
           <form onSubmit={handleFormSubmit} style={{ background: '#fff', width: '100%', maxWidth: 440, borderRadius: 28, padding: 24, margin: '0 auto', boxShadow: '0 20px 60px rgba(0,0,0,.2)' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16, borderBottom: '1px solid #f1f5f9', paddingBottom: 12 }}>
-              <h2 style={{ fontSize: 16, fontWeight: 900 }}>{editingOrderId ? '修改訂單' : '新增排程訂單'}</h2>
+              <h2 style={{ fontSize: 16, fontWeight: 900 }}>{editingOrderId ? '修改訂單' : '新增客訂訂單'}</h2>
               <button type="button" onClick={closeForm} style={{ background: '#f8fafc', border: 'none', borderRadius: '50%', width: 32, height: 32, cursor: 'pointer' }}>✕</button>
             </div>
 
@@ -442,7 +502,7 @@ export default function OrdersPage({ user }) {
 
             <div style={{ marginBottom: 12 }}>
               <div style={{ fontSize: 13, color: '#94a3b8', fontWeight: 700, marginBottom: 4 }}>客戶名稱 *</div>
-              <input type="text" name="customer_name" value={formData.customer_name} onChange={handleInputChange} style={{ width: '100%', background: '#f8fafc', border: 'none', borderRadius: 12, padding: '12px 14px', fontSize: 15, fontWeight: 700, fontFamily: 'inherit' }} placeholder="例如：麗合-本院" />
+              <input type="text" name="customer_name" value={formData.customer_name} onChange={handleInputChange} style={{ width: '100%', background: '#f8fafc', border: 'none', borderRadius: 12, padding: '12px 14px', fontSize: 15, fontWeight: 700, fontFamily: 'inherit' }} placeholder="例如：麗合-本院" inputMode="text" lang="zh-TW" />
             </div>
 
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 12 }}>
@@ -476,7 +536,12 @@ export default function OrdersPage({ user }) {
               </div>
               <div style={{ marginBottom: 8 }}>
                 <div style={{ fontSize: 12, color: '#6366f1', marginBottom: 3 }}>箱入數（每箱幾袋）</div>
-                <input type="number" name="items_per_box" value={formData.items_per_box} onChange={handleInputChange} style={{ width: '100%', background: '#fff', border: 'none', borderRadius: 10, padding: '8px', fontFamily: 'inherit' }} placeholder="例如：5" />
+                <input type="number" name="items_per_box" value={formData.items_per_box} onChange={e => {
+                    handleInputChange(e)
+                    const v = e.target.value
+                    if (v && parseInt(v) > 0) { setUseBoxCalc(true); setBoxQtyInput(v) }
+                    else { setUseBoxCalc(false); setBoxQtyInput('') }
+                  }} style={{ width: '100%', background: '#fff', border: 'none', borderRadius: 10, padding: '8px', fontFamily: 'inherit' }} placeholder="例如：5（填了自動換算）" />
               </div>
               <div style={{ display: 'flex', gap: 8 }}>
                 <label style={{ display: 'flex', alignItems: 'center', gap: 6, background: '#fff', padding: '7px 10px', borderRadius: 10, cursor: 'pointer', flex: 1 }}>
@@ -515,10 +580,7 @@ export default function OrdersPage({ user }) {
             <div style={{ marginBottom: 12 }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
                 <div style={{ fontSize: 13, color: '#94a3b8', fontWeight: 700 }}>訂購數量 *</div>
-                <label style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 12, color: '#6366f1', cursor: 'pointer' }}>
-                  <input type="checkbox" checked={useBoxCalc} onChange={e => { setUseBoxCalc(e.target.checked); setBoxCountInput(''); setBoxQtyInput('') }} style={{ width: 13, height: 13 }} />
-                  用箱數換算
-                </label>
+  <span style={{ fontSize: 12, color: '#6366f1' }}>{useBoxCalc ? '箱數換算模式' : '直接填袋數'}</span>
               </div>
               {useBoxCalc ? (
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr auto 1fr auto 1fr', gap: 6, alignItems: 'center' }}>
