@@ -458,8 +458,6 @@ export default function OrdersPage({ user }) {
                 const states = ['pending', 'scheduled', 'prepared', 'shipped']
                 const updateData = { status: statusModal.nextStatus, updated_at: new Date().toISOString() }
                 if (statusModal.nextStatus === 'scheduled') updateData.scheduled_date = statusDate
-                else if (statusModal.nextStatus === 'prepared') updateData.prepared_date = statusDate
-                else if (statusModal.nextStatus === 'shipped') updateData.target_date = statusDate
                 await supabase.from('adv_orders').update(updateData).eq('id', statusModal.order.id)
                 fetchOrders()
                 showToast(`${statusModal.label} ✅`)
