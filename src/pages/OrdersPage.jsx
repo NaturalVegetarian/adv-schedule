@@ -168,6 +168,22 @@ export default function OrdersPage({ user }) {
     setSavedItems(newItems); setIsSettingsOpen(false); showToast('品名已同步 ✅')
   }
 
+
+  // 計算單筆訂單的箱數
+  const getBoxCount = o => {
+    if (o.box_count > 0) return o.box_count  // 直接下箱數
+    const ipb = o.items_per_box || o.itemsPerBox || 0
+    if (ipb > 0) return Math.ceil(Number(o.quantity) / ipb)
+    return 0
+  }
+  // 計算單筆訂單的包數
+  const getPkgCount = o => {
+    if (o.box_count > 0) {
+      const ipb = o.items_per_box || o.itemsPerBox || o.box_qty_each || 0
+      return ipb > 0 ? o.box_count * ipb : Number(o.quantity)
+    }
+    return Number(o.quantity)
+  }
   const sortedOrders = useMemo(() => [...orders].sort((a, b) => new Date(b.created_at) - new Date(a.created_at)), [orders])
   const filteredOrders = sortedOrders.filter(o => o.status === activeTab && (o.item_name || o.itemName || '').includes(filterFlavor))
   const groupedByCustomer = filteredOrders.reduce((acc, o) => {
@@ -251,10 +267,9 @@ export default function OrdersPage({ user }) {
                 <div style={{ background: th.header, padding: '10px 16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                   <span style={{ fontSize: 16, fontWeight: 900, color: '#fff' }}>{parentName}</span>
 <span style={{ fontSize: 13, color: 'rgba(255,255,255,.8)', fontWeight: 700 }}>{(() => {
-                    const totalPkg = totalQty
-                    const ipbVal = allOrders[0]?.items_per_box || allOrders[0]?.itemsPerBox || 0
-                    const totalBox = ipbVal > 0 ? Math.ceil(totalPkg / ipbVal) : 0
-                    return `共${allOrders.length}筆・${totalPkg}包${totalBox > 0 ? `・${totalBox}箱` : ''}`
+                    const totalPkg2 = allOrders.reduce((s,o) => s + getPkgCount(o), 0)
+                    const totalBox2 = allOrders.reduce((s,o) => s + getBoxCount(o), 0)
+                    return `共${allOrders.length}筆・${totalPkg2}包${totalBox2 > 0 ? `・${totalBox2}箱` : ''}`
                   })()}</span>
                 </div>
                 {/* 各子客戶 */}
@@ -269,10 +284,9 @@ export default function OrdersPage({ user }) {
                       </div>
 <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
                         {(() => {
-                          const subQty = list.reduce((s,o) => s + Number(o.quantity), 0)
-                          const ipb2 = list[0]?.items_per_box || list[0]?.itemsPerBox || 0
-                          const subBox = ipb2 > 0 ? Math.ceil(subQty / ipb2) : 0
-                          return <span style={{ fontSize: 12, fontWeight: 700, color: th.accent }}>{subQty}包{subBox > 0 ? `・${subBox}箱` : ''}</span>
+                          const subPkg = list.reduce((s,o) => s + getPkgCount(o), 0)
+                          const subBox2 = list.reduce((s,o) => s + getBoxCount(o), 0)
+                          return <span style={{ fontSize: 12, fontWeight: 700, color: th.accent }}>{subPkg}包{subBox2 > 0 ? `・${subBox2}箱` : ''}</span>
                         })()}
                         <span style={{ fontSize: 12, background: '#f1f5f9', color: '#64748b', padding: '2px 8px', borderRadius: 10, fontWeight: 700 }}>{list[0]?.logistics || '物流未定'}</span>
                       </div>
@@ -294,8 +308,8 @@ export default function OrdersPage({ user }) {
                         </div>
                         <div style={{ textAlign: 'right' }}>
                           <div style={{ fontSize: 26, fontWeight: 900, color: '#1e293b' }}>{o.quantity} <span style={{ fontSize: 14, color: '#94a3b8' }}>袋</span></div>
-                          {o.box_count > 0 && <div style={{ fontSize: 12, color: '#64748b' }}>{o.box_count}箱 × {o.box_qty_each}袋</div>}
-                          {ipb > 0 && <div style={{ fontSize: 12, color: '#166534', background: '#f0fdf4', padding: '2px 8px', borderRadius: 6 }}>📦 {boxDisplay}</div>}
+                          {getBoxCount(o) > 0 && <div style={{ fontSize: 12, color: '#059669', fontWeight: 700 }}>📦 {getBoxCount(o)} 箱</div>}
+                          {o.box_count > 0 && o.box_qty_each > 0 && <div style={{ fontSize: 11, color: '#64748b' }}>{o.box_count}箱 × {o.box_qty_each}袋/箱</div>}
                         </div>
                       </div>
                       <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 8 }}>
@@ -332,9 +346,9 @@ export default function OrdersPage({ user }) {
                   <div style={{ background: '#f8fafc', padding: '10px 16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                     <span style={{ fontSize: 13, color: '#64748b', fontWeight: 700 }}>合計</span>
   <span style={{ fontSize: 15, fontWeight: 900, color: th.accent }}>{(() => {
-                      const ipbF = allOrders[0]?.items_per_box || allOrders[0]?.itemsPerBox || 0
-                      const boxF = ipbF > 0 ? Math.ceil(totalQty / ipbF) : 0
-                      return `${totalQty} 包${boxF > 0 ? `・${boxF} 箱` : ''}`
+                      const fPkg = allOrders.reduce((s,o) => s + getPkgCount(o), 0)
+                      const fBox = allOrders.reduce((s,o) => s + getBoxCount(o), 0)
+                      return `${fPkg} 包${fBox > 0 ? `・${fBox} 箱` : ''}`
                     })()}</span>
                   </div>
                 )}
