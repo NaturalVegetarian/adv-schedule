@@ -26,11 +26,11 @@ export default function OrdersPage({ user }) {
 
   // 欄位名稱對照原始資料庫（camelCase 舊欄位 + snake_case 新欄位）
   const emptyForm = {
-    customerName: '', itemName: '', quantity: '', unit: '袋',
-    logistics: '', boxType: '', itemsPerBox: '',
-    shippingMark: false, isMixedBox: false,
-    targetDate: '', scheduledDate: '', notes: '',
-    // 新欄位（snake_case）
+    // 全部用 snake_case 對應資料庫
+    customer_name: '', item_name: '', quantity: '', unit: '袋',
+    logistics: '', box_type: '', items_per_box: '',
+    shipping_mark: false, is_mixed_box: false,
+    target_date: '', scheduled_date: '', notes: '',
     weight_per_bag: 5250,
     color_mark: false, color_mark_note: '',
     box_count: 0, box_qty_each: 0,
@@ -73,9 +73,9 @@ export default function OrdersPage({ user }) {
   const handleFormSubmit = e => {
     e.preventDefault()
     setFormError('')
-    if (!formData.customerName.trim()) { setFormError('請填寫客戶名稱'); return }
-    if (!formData.itemName) { setFormError('請選擇口味品項'); return }
-    if (!formData.targetDate) { setFormError('請選擇指定出貨日'); return }
+    if (!formData.customer_name.trim()) { setFormError('請填寫客戶名稱'); return }
+    if (!formData.item_name) { setFormError('請選擇口味品項'); return }
+    if (!formData.target_date) { setFormError('請選擇指定出貨日'); return }
 
     let finalQty = 0
     if (useBoxCalc) {
@@ -89,8 +89,8 @@ export default function OrdersPage({ user }) {
     setPendingOrderData({
       ...formData,
       quantity: finalQty,
-      itemsPerBox: Math.round(Number(formData.itemsPerBox)) || 0,
-      customerName: formData.customerName.trim(),
+      items_per_box: Math.round(Number(formData.items_per_box)) || 0,
+      customer_name: formData.customer_name.trim(),
       notes: formData.notes?.trim() || '',
       weight_per_bag: Number(formData.weight_per_bag) || 5250,
       box_count: useBoxCalc ? parseInt(boxCountInput) || 0 : 0,
@@ -113,8 +113,8 @@ export default function OrdersPage({ user }) {
       })
       if (error) throw error
       showToast(editingOrderId ? '訂單修改成功 ✅' : '訂單已儲存 ✅')
-      if (formData.isMixedBox && submitActionRef.current === 'continue' && !editingOrderId) {
-        setFormData(p => ({ ...p, itemName: '', quantity: '', notes: '' }))
+      if (formData.is_mixed_box && submitActionRef.current === 'continue' && !editingOrderId) {
+        setFormData(p => ({ ...p, item_name: '', quantity: '', notes: '' }))
         setBoxCountInput(''); setBoxQtyInput('')
         setIsConfirmOpen(false); setPendingOrderData(null)
       } else { setIsConfirmOpen(false); setPendingOrderData(null); closeForm() }
@@ -137,7 +137,7 @@ export default function OrdersPage({ user }) {
 
   const openEditForm = order => {
     setFormData({ ...emptyForm, ...order })
-    if (order.box_count > 0) { setUseBoxCalc(true); setBoxCountInput(String(order.box_count)); setBoxQtyInput(String(order.box_qty_each)) }
+    if ((order.box_count||0) > 0) { setUseBoxCalc(true); setBoxCountInput(String(order.box_count)); setBoxQtyInput(String(order.box_qty_each)) }
     setEditingOrderId(order.id); setIsFormOpen(true)
   }
 
@@ -150,7 +150,7 @@ export default function OrdersPage({ user }) {
     if (!newItemName.trim()) return
     const items = [...savedItems, newItemName.trim()]
     await supabase.from('adv_flavor_config').upsert({ id: 'default', items, updated_at: new Date().toISOString() })
-    setFormData(p => ({ ...p, itemName: newItemName.trim() }))
+    setFormData(p => ({ ...p, item_name: newItemName.trim() }))
     setNewItemName(''); setIsAddingNewItem(false); showToast('規格新增成功 ✅')
   }
 
@@ -161,8 +161,16 @@ export default function OrdersPage({ user }) {
   }
 
   const sortedOrders = useMemo(() => [...orders].sort((a, b) => new Date(b.created_at) - new Date(a.created_at)), [orders])
-  const filteredOrders = sortedOrders.filter(o => o.status === activeTab && (o.itemName || '').includes(filterFlavor))
-  const groupedByCustomer = filteredOrders.reduce((acc, o) => { const k = o.customerName || '未知客戶'; if (!acc[k]) acc[k] = []; acc[k].push(o); return acc }, {})
+  const filteredOrders = sortedOrders.filter(o => o.status === activeTab && (o.item_name || o.itemName || '').includes(filterFlavor))
+  const groupedByCustomer = filteredOrders.reduce((acc, o) => {
+    const fullName = o.customer_name || o.customerName || '未知客戶'
+    const parentKey = fullName.includes('-') ? fullName.split('-')[0] : fullName
+    if (!acc[parentKey]) acc[parentKey] = { subGroups: {}, all: [] }
+    if (!acc[parentKey].subGroups[fullName]) acc[parentKey].subGroups[fullName] = []
+    acc[parentKey].subGroups[fullName].push(o)
+    acc[parentKey].all.push(o)
+    return acc
+  }, {})
 
   const formatDate = d => d ? `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}` : ''
   const getNextWeekRange = date => {
@@ -172,8 +180,8 @@ export default function OrdersPage({ user }) {
     return { start: nMon, end: nFri }
   }
   const nextWeek = getNextWeekRange(selectedDate)
-  const nextWeekSummary = sortedOrders.filter(o => { if (!o.targetDate) return false; const d = new Date(o.targetDate); return d >= nextWeek.start && d <= nextWeek.end }).reduce((acc, o) => { if (!acc[o.itemName]) acc[o.itemName] = { qty: 0 }; acc[o.itemName].qty += Number(o.quantity); return acc }, {})
-  const customerSummary = sortedOrders.filter(o => o.targetDate === formatDate(selectedDate)).reduce((acc, o) => { if (!acc[o.customerName]) acc[o.customerName] = { items: [], total: 0 }; acc[o.customerName].items.push(o); acc[o.customerName].total += Number(o.quantity); return acc }, {})
+  const nextWeekSummary = sortedOrders.filter(o => { const td = o.target_date||o.targetDate; if (!td) return false; const d = new Date(td); return d >= nextWeek.start && d <= nextWeek.end }).reduce((acc, o) => { const iName = o.item_name||o.itemName||''; if (!acc[iName]) acc[iName] = { qty: 0 }; acc[iName].qty += Number(o.quantity); return acc }, {})
+  const customerSummary = sortedOrders.filter(o => (o.target_date||o.targetDate) === formatDate(selectedDate)).reduce((acc, o) => { const cName = o.customer_name||o.customerName||'未知客戶'; if (!acc[cName]) acc[cName] = { items: [], total: 0 }; acc[cName].items.push(o); acc[cName].total += Number(o.quantity); return acc }, {})
   const calendarData = useMemo(() => {
     const year = currentMonth.getFullYear(), month = currentMonth.getMonth()
     const firstDay = new Date(year, month, 1).getDay(), totalDays = new Date(year, month + 1, 0).getDate()
@@ -224,27 +232,42 @@ export default function OrdersPage({ user }) {
         {activeTab !== 'stats' ? (
           Object.keys(groupedByCustomer).length === 0
             ? <div style={{ textAlign: 'center', padding: '60px 0', color: '#94a3b8', fontStyle: 'italic' }}>目前無資料</div>
-            : Object.entries(groupedByCustomer).map(([name, list]) => (
-              <div key={name} style={{ background: '#fff', borderRadius: 24, border: `1px solid ${th.border}`, overflow: 'hidden', marginBottom: 16 }}>
-                <div style={{ background: 'rgba(255,255,255,.5)', padding: '12px 16px', borderBottom: `1px solid ${th.border}`, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-                    <span style={{ fontSize: 16, fontWeight: 900, color: '#475569' }}>{name}</span>
-                    {list[0]?.shippingMark && <span style={{ fontSize: 12, background: '#fef2f2', color: '#ef4444', padding: '1px 8px', borderRadius: 20, fontWeight: 700 }}>🏷️ 一般麥頭</span>}
-                    {list[0]?.color_mark && <span style={{ fontSize: 12, background: '#fdf4ff', color: '#7e22ce', padding: '1px 8px', borderRadius: 20, fontWeight: 700 }}>🎨 彩色麥頭{list[0]?.color_mark_note ? `(${list[0].color_mark_note})` : ''}</span>}
-                  </div>
-                  <span style={{ fontSize: 13, background: '#f1f5f9', color: '#64748b', padding: '3px 10px', borderRadius: 20, fontWeight: 700 }}>{list[0]?.logistics || '物流未定'}</span>
+            : Object.entries(groupedByCustomer).map(([parentName, group]) => {
+              const allOrders = group.all || []
+              const subGroups = group.subGroups || { [parentName]: allOrders }
+              const totalQty = allOrders.reduce((s, o) => s + Number(o.quantity), 0)
+              const hasMultipleSub = Object.keys(subGroups).length > 1
+              return (
+              <div key={parentName} style={{ background: '#fff', borderRadius: 24, border: `1px solid ${th.border}`, overflow: 'hidden', marginBottom: 16 }}>
+                {/* 母客戶標題列 */}
+                <div style={{ background: th.header, padding: '10px 16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <span style={{ fontSize: 16, fontWeight: 900, color: '#fff' }}>{parentName}</span>
+                  <span style={{ fontSize: 13, color: 'rgba(255,255,255,.8)', fontWeight: 700 }}>共 {allOrders.length} 筆・{totalQty} 袋</span>
                 </div>
+                {/* 各子客戶 */}
+                {Object.entries(subGroups).map(([subName, list]) => (
+                <div key={subName} style={{ borderBottom: `1px solid ${th.border}` }}>
+                  {hasMultipleSub && (
+                    <div style={{ background: 'rgba(255,255,255,.6)', padding: '8px 16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: `1px solid ${th.border}` }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                        <span style={{ fontSize: 14, fontWeight: 700, color: '#475569' }}>{subName}</span>
+                        {list[0]?.shipping_mark && <span style={{ fontSize: 11, background: '#fef2f2', color: '#ef4444', padding: '1px 7px', borderRadius: 20, fontWeight: 700 }}>🏷️ 一般麥頭</span>}
+                        {list[0]?.color_mark && <span style={{ fontSize: 11, background: '#fdf4ff', color: '#7e22ce', padding: '1px 7px', borderRadius: 20, fontWeight: 700 }}>🎨 彩色{list[0]?.color_mark_note ? `(${list[0].color_mark_note})` : ''}</span>}
+                      </div>
+                      <span style={{ fontSize: 12, background: '#f1f5f9', color: '#64748b', padding: '2px 8px', borderRadius: 10, fontWeight: 700 }}>{list[0]?.logistics || '物流未定'}</span>
+                    </div>
+                  )}
                 {list.map(o => {
-                  const ipb = Math.round(Number(o.itemsPerBox)) || 0
+                  const ipb = Math.round(Number(o.items_per_box||o.itemsPerBox)) || 0
                   let boxDisplay = ''
                   if (ipb > 0) { const boxes = Math.floor(Number(o.quantity) / ipb), rem = Number(o.quantity) % ipb; boxDisplay = `${boxes}箱${rem > 0 ? ` + ${rem}袋` : ''}` }
                   return (
                     <div key={o.id} style={{ padding: '16px', borderBottom: `1px solid #f8fafc` }}>
                       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 8 }}>
                         <div style={{ flex: 1, paddingRight: 12 }}>
-                          <div style={{ fontSize: 18, fontWeight: 900, color: th.accent, marginBottom: 4 }}>{o.itemName}</div>
+                          <div style={{ fontSize: 18, fontWeight: 900, color: th.accent, marginBottom: 4 }}>{o.item_name||o.itemName}</div>
                           <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap' }}>
-                            {o.isMixedBox && <span style={{ fontSize: 12, background: '#fef3c7', color: '#92400e', padding: '2px 8px', borderRadius: 6, fontWeight: 700 }}>併箱</span>}
+                            {(o.is_mixed_box||o.isMixedBox) && <span style={{ fontSize: 12, background: '#fef3c7', color: '#92400e', padding: '2px 8px', borderRadius: 6, fontWeight: 700 }}>併箱</span>}
                             <span style={{ fontSize: 12, background: '#f1f5f9', color: '#64748b', padding: '2px 8px', borderRadius: 6 }}>{o.weight_per_bag || 5250}g/袋</span>
                           </div>
                         </div>
@@ -255,13 +278,13 @@ export default function OrdersPage({ user }) {
                         </div>
                       </div>
                       <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 8 }}>
-                        {o.boxType && <span style={{ fontSize: 12, background: '#eff6ff', color: '#1d4ed8', padding: '2px 8px', borderRadius: 6, fontWeight: 700 }}>{o.boxType}</span>}
+                        {(o.box_type||o.boxType) && <span style={{ fontSize: 12, background: '#eff6ff', color: '#1d4ed8', padding: '2px 8px', borderRadius: 6, fontWeight: 700 }}>{o.box_type||o.boxType}</span>}
                         {o.notes && <span style={{ fontSize: 12, background: '#f8fafc', color: '#475569', padding: '2px 8px', borderRadius: 6 }}>📝 {o.notes}</span>}
                       </div>
                       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', paddingTop: 8, borderTop: '1px dashed #f1f5f9' }}>
                         <div style={{ fontSize: 12, color: '#94a3b8' }}>
-                          {o.scheduledDate && <div>排程：{o.scheduledDate}</div>}
-                          <div style={{ fontWeight: 700, color: th.accent }}>出貨：{o.targetDate || '未定'}</div>
+                          {(o.scheduled_date||o.scheduledDate) && <div>排程：{o.scheduled_date||o.scheduledDate}</div>}
+                          <div style={{ fontWeight: 700, color: th.accent }}>出貨：{o.target_date||o.targetDate || '未定'}</div>
                         </div>
                         <div style={{ display: 'flex', gap: 4 }}>
                           <button onClick={() => openEditForm(o)} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 16, color: '#94a3b8', padding: '4px 6px' }}>✏️</button>
@@ -275,8 +298,17 @@ export default function OrdersPage({ user }) {
                     </div>
                   )
                 })}
+                </div>
+                ))}
+                {/* 總計列 */}
+                {hasMultipleSub && (
+                  <div style={{ background: '#f8fafc', padding: '10px 16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <span style={{ fontSize: 13, color: '#64748b', fontWeight: 700 }}>合計</span>
+                    <span style={{ fontSize: 15, fontWeight: 900, color: th.accent }}>{totalQty} 袋</span>
+                  </div>
+                )}
               </div>
-            ))
+            )})
         ) : (
           <div>
             <div style={{ background: '#fff', borderRadius: 24, padding: 20, marginBottom: 12 }}>
@@ -290,7 +322,7 @@ export default function OrdersPage({ user }) {
                 {calendarData.map((d, i) => {
                   if (!d) return <div key={`e${i}`}></div>
                   const ds = formatDate(d), isSel = selectedDate && ds === formatDate(selectedDate)
-                  const cnt = orders.filter(o => o.targetDate === ds).length
+                  const cnt = orders.filter(o => (o.target_date||o.targetDate) === ds).length
                   return (
                     <button key={ds} onClick={() => setSelectedDate(d)} style={{ aspectRatio: '1', borderRadius: 12, border: 'none', cursor: 'pointer', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', background: isSel ? th.header : 'transparent', color: isSel ? '#fff' : '#1e293b', fontWeight: isSel ? 900 : 400 }}>
                       <span style={{ fontSize: 14 }}>{d.getDate()}</span>
@@ -319,14 +351,14 @@ export default function OrdersPage({ user }) {
                       <div style={{ background: '#f8fafc', padding: '8px 14px', display: 'flex', justifyContent: 'space-between', fontWeight: 700, fontSize: 15 }}>
                         <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
                           {name}
-                          {data.items[0]?.shippingMark && <span style={{ fontSize: 11, background: '#fef2f2', color: '#ef4444', padding: '1px 5px', borderRadius: 4 }}>麥頭</span>}
+                          {(data.items[0]?.shipping_mark||data.items[0]?.shippingMark) && <span style={{ fontSize: 11, background: '#fef2f2', color: '#ef4444', padding: '1px 5px', borderRadius: 4 }}>麥頭</span>}
                           {data.items[0]?.color_mark && <span style={{ fontSize: 11, background: '#fdf4ff', color: '#7e22ce', padding: '1px 5px', borderRadius: 4 }}>彩色{data.items[0]?.color_mark_note ? `(${data.items[0].color_mark_note})` : ''}</span>}
                         </div>
                         <span>{data.total} 袋</span>
                       </div>
                       {data.items.map(item => (
                         <div key={item.id} style={{ padding: '8px 14px', display: 'flex', justifyContent: 'space-between', borderTop: '1px solid #f8fafc', fontSize: 14 }}>
-                          <span style={{ color: '#475569' }}>{item.itemName}</span>
+                          <span style={{ color: '#475569' }}>{item.item_name||item.itemName}</span>
                           <span style={{ color: th.header, fontWeight: 700 }}>{item.quantity} 袋</span>
                         </div>
                       ))}
@@ -366,9 +398,9 @@ export default function OrdersPage({ user }) {
           <div style={{ background: '#fff', width: '100%', maxWidth: 360, borderRadius: 28, padding: 24 }}>
             <h2 style={{ fontSize: 16, fontWeight: 900, color: '#3730a3', marginBottom: 16, borderBottom: '1px solid #f1f5f9', paddingBottom: 12 }}>🛡️ 請確認訂單內容</h2>
             <div style={{ background: '#f8fafc', borderRadius: 12, padding: 16, marginBottom: 12 }}>
-              <div style={{ fontSize: 14, color: '#64748b', marginBottom: 3 }}>客戶：<strong style={{ color: '#1e293b' }}>{pendingOrderData.customerName}</strong></div>
-              <div style={{ fontSize: 14, color: '#64748b', marginBottom: 3 }}>品項：<strong style={{ color: '#4f46e5' }}>{pendingOrderData.itemName}</strong></div>
-              <div style={{ fontSize: 14, color: '#64748b', marginBottom: 10 }}>出貨日：<strong style={{ color: '#dc2626' }}>{pendingOrderData.targetDate}</strong></div>
+              <div style={{ fontSize: 14, color: '#64748b', marginBottom: 3 }}>客戶：<strong style={{ color: '#1e293b' }}>{pendingOrderData.customer_name}</strong></div>
+              <div style={{ fontSize: 14, color: '#64748b', marginBottom: 3 }}>品項：<strong style={{ color: '#4f46e5' }}>{pendingOrderData.item_name}</strong></div>
+              <div style={{ fontSize: 14, color: '#64748b', marginBottom: 10 }}>出貨日：<strong style={{ color: '#dc2626' }}>{pendingOrderData.target_date}</strong></div>
               <div style={{ display: 'flex', justifyContent: 'space-between', borderTop: '1px solid #e2e8f0', paddingTop: 10 }}>
                 <div>
                   <div style={{ fontSize: 12, color: '#94a3b8' }}>訂購數量</div>
@@ -382,9 +414,9 @@ export default function OrdersPage({ user }) {
               </div>
             </div>
             <div style={{ display: 'flex', gap: 6, marginBottom: 12, flexWrap: 'wrap' }}>
-              {pendingOrderData.boxType && <div style={{ background: '#eff6ff', borderRadius: 8, padding: '6px 10px', fontSize: 13, fontWeight: 700, color: '#1d4ed8' }}>📦 {pendingOrderData.boxType}</div>}
-              {pendingOrderData.itemsPerBox > 0 && <div style={{ background: '#f0fdf4', borderRadius: 8, padding: '6px 10px', fontSize: 13, fontWeight: 700, color: '#166534' }}>每箱{pendingOrderData.itemsPerBox}袋</div>}
-              {pendingOrderData.shippingMark && <div style={{ background: '#fef2f2', borderRadius: 8, padding: '6px 10px', fontSize: 13, fontWeight: 700, color: '#dc2626' }}>🏷️ 一般麥頭</div>}
+              {(pendingOrderData.box_type||pendingOrderData.boxType) && <div style={{ background: '#eff6ff', borderRadius: 8, padding: '6px 10px', fontSize: 13, fontWeight: 700, color: '#1d4ed8' }}>📦 {pendingOrderData.box_type||pendingOrderData.boxType}</div>}
+              {(pendingOrderData.items_per_box||pendingOrderData.itemsPerBox||0) > 0 && <div style={{ background: '#f0fdf4', borderRadius: 8, padding: '6px 10px', fontSize: 13, fontWeight: 700, color: '#166534' }}>每箱{pendingOrderData.items_per_box||pendingOrderData.itemsPerBox}袋</div>}
+              {(pendingOrderData.shipping_mark||pendingOrderData.shippingMark) && <div style={{ background: '#fef2f2', borderRadius: 8, padding: '6px 10px', fontSize: 13, fontWeight: 700, color: '#dc2626' }}>🏷️ 一般麥頭</div>}
               {pendingOrderData.color_mark && <div style={{ background: '#fdf4ff', borderRadius: 8, padding: '6px 10px', fontSize: 13, fontWeight: 700, color: '#7e22ce' }}>🎨 彩色麥頭{pendingOrderData.color_mark_note ? `(${pendingOrderData.color_mark_note})` : ''}</div>}
             </div>
             <button onClick={executeSave} style={{ width: '100%', padding: '12px', background: '#059669', color: '#fff', border: 'none', borderRadius: 16, fontWeight: 900, fontSize: 15, cursor: 'pointer', marginBottom: 8 }}>確認無誤，正式存檔</button>
@@ -406,17 +438,17 @@ export default function OrdersPage({ user }) {
 
             <div style={{ marginBottom: 12 }}>
               <div style={{ fontSize: 13, color: '#94a3b8', fontWeight: 700, marginBottom: 4 }}>客戶名稱 *</div>
-              <input type="text" name="customerName" value={formData.customerName} onChange={handleInputChange} style={{ width: '100%', background: '#f8fafc', border: 'none', borderRadius: 12, padding: '12px 14px', fontSize: 15, fontWeight: 700, fontFamily: 'inherit' }} placeholder="例如：麗合-本院" />
+              <input type="text" name="customer_name" value={formData.customer_name} onChange={handleInputChange} style={{ width: '100%', background: '#f8fafc', border: 'none', borderRadius: 12, padding: '12px 14px', fontSize: 15, fontWeight: 700, fontFamily: 'inherit' }} placeholder="例如：麗合-本院" />
             </div>
 
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 12 }}>
               <div>
                 <div style={{ fontSize: 13, color: '#059669', fontWeight: 700, marginBottom: 4 }}>排程生產日</div>
-                <input type="date" name="scheduledDate" value={formData.scheduledDate} onChange={handleInputChange} style={{ width: '100%', background: '#f0fdf4', border: 'none', borderRadius: 12, padding: '10px', fontFamily: 'inherit' }} />
+                <input type="date" name="scheduled_date" value={formData.scheduled_date} onChange={handleInputChange} style={{ width: '100%', background: '#f0fdf4', border: 'none', borderRadius: 12, padding: '10px', fontFamily: 'inherit' }} />
               </div>
               <div>
                 <div style={{ fontSize: 13, color: '#ef4444', fontWeight: 700, marginBottom: 4 }}>指定出貨日 *</div>
-                <input type="date" name="targetDate" value={formData.targetDate} onChange={handleInputChange} style={{ width: '100%', background: '#fef2f2', border: 'none', borderRadius: 12, padding: '10px', fontFamily: 'inherit' }} />
+                <input type="date" name="target_date" value={formData.target_date} onChange={handleInputChange} style={{ width: '100%', background: '#fef2f2', border: 'none', borderRadius: 12, padding: '10px', fontFamily: 'inherit' }} />
               </div>
             </div>
 
@@ -432,7 +464,7 @@ export default function OrdersPage({ user }) {
                 </div>
                 <div>
                   <div style={{ fontSize: 12, color: '#6366f1', marginBottom: 3 }}>外箱規格</div>
-                  <select name="boxType" value={formData.boxType} onChange={handleInputChange} style={{ width: '100%', background: '#fff', border: 'none', borderRadius: 10, padding: '8px', fontFamily: 'inherit' }}>
+                  <select name="box_type" value={formData.box_type} onChange={handleInputChange} style={{ width: '100%', background: '#fff', border: 'none', borderRadius: 10, padding: '8px', fontFamily: 'inherit' }}>
                     <option value="">請選擇</option>
                     <option>大紙箱</option><option>中紙箱</option><option>大紙箱(空白)</option><option>中紙箱(空白)</option><option>中箱專用箱</option>
                   </select>
@@ -440,11 +472,11 @@ export default function OrdersPage({ user }) {
               </div>
               <div style={{ marginBottom: 8 }}>
                 <div style={{ fontSize: 12, color: '#6366f1', marginBottom: 3 }}>箱入數（每箱幾袋）</div>
-                <input type="number" name="itemsPerBox" value={formData.itemsPerBox} onChange={handleInputChange} style={{ width: '100%', background: '#fff', border: 'none', borderRadius: 10, padding: '8px', fontFamily: 'inherit' }} placeholder="例如：5" />
+                <input type="number" name="items_per_box" value={formData.items_per_box} onChange={handleInputChange} style={{ width: '100%', background: '#fff', border: 'none', borderRadius: 10, padding: '8px', fontFamily: 'inherit' }} placeholder="例如：5" />
               </div>
               <div style={{ display: 'flex', gap: 8 }}>
                 <label style={{ display: 'flex', alignItems: 'center', gap: 6, background: '#fff', padding: '7px 10px', borderRadius: 10, cursor: 'pointer', flex: 1 }}>
-                  <input type="checkbox" name="shippingMark" checked={formData.shippingMark} onChange={handleInputChange} style={{ width: 15, height: 15 }} />
+                  <input type="checkbox" name="shipping_mark" checked={formData.shipping_mark} onChange={handleInputChange} style={{ width: 15, height: 15 }} />
                   <span style={{ fontSize: 13, fontWeight: 700, color: '#ef4444' }}>🏷️ 一般麥頭</span>
                 </label>
                 <label style={{ display: 'flex', alignItems: 'center', gap: 6, background: '#fff', padding: '7px 10px', borderRadius: 10, cursor: 'pointer', flex: 1 }}>
@@ -460,7 +492,7 @@ export default function OrdersPage({ user }) {
             <div style={{ marginBottom: 12 }}>
               <div style={{ fontSize: 13, color: '#94a3b8', fontWeight: 700, marginBottom: 4 }}>口味品項規格 *</div>
               <div style={{ display: 'flex', gap: 6 }}>
-                <select name="itemName" value={formData.itemName} onChange={handleInputChange} style={{ flex: 1, background: '#f8fafc', border: 'none', borderRadius: 12, padding: '12px 14px', fontWeight: 700, fontFamily: 'inherit' }}>
+                <select name="item_name" value={formData.item_name} onChange={handleInputChange} style={{ flex: 1, background: '#f8fafc', border: 'none', borderRadius: 12, padding: '12px 14px', fontWeight: 700, fontFamily: 'inherit' }}>
                   <option value="">請選擇規格</option>
                   {savedItems.map(f => <option key={f} value={f}>{f}</option>)}
                 </select>
@@ -508,7 +540,7 @@ export default function OrdersPage({ user }) {
             </div>
 
             <label style={{ display: 'flex', alignItems: 'flex-start', gap: 10, background: '#fffbeb', border: '1px solid #fde68a', borderRadius: 12, padding: 12, cursor: 'pointer', marginBottom: 16 }}>
-              <input type="checkbox" name="isMixedBox" checked={formData.isMixedBox} onChange={handleInputChange} style={{ width: 17, height: 17, marginTop: 1 }} />
+              <input type="checkbox" name="is_mixed_box" checked={formData.is_mixed_box} onChange={handleInputChange} style={{ width: 17, height: 17, marginTop: 1 }} />
               <span style={{ fontSize: 13, fontWeight: 700, color: '#92400e' }}>併箱口味（儲存後保留客戶與日期，方便輸入下一項）</span>
             </label>
 
