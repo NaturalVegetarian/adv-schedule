@@ -20,8 +20,6 @@ export default function OrdersPage({ user }) {
   const [savedItems, setSavedItems] = useState(['黃金滿福餃(營業用)', '泡菜滿福餃(營業用)', '素花滿福餃(營業用)', '新鮮蔬滿福餃(營業用)', '剝皮辣椒滿福餃(營業用)', '酸白菜滿福餃(營業用)', '自然齋香羹(營業用)', '黃金滿福餃散裝'])
   const [editingConfigs, setEditingConfigs] = useState([])
   const [activeTab, setActiveTab] = useState('pending')
-  const [currentMonth, setCurrentMonth] = useState(new Date())
-  const [selectedDate, setSelectedDate] = useState(new Date())
   const [isFormOpen, setIsFormOpen] = useState(false)
   const [isSettingsOpen, setIsSettingsOpen] = useState(false)
   const [isConfirmOpen, setIsConfirmOpen] = useState(false)
@@ -29,6 +27,7 @@ export default function OrdersPage({ user }) {
   const [isAddingNewItem, setIsAddingNewItem] = useState(false)
   const [newItemName, setNewItemName] = useState('')
   const [filterFlavor, setFilterFlavor] = useState('')
+  const [shipMonth, setShipMonth] = useState('') // 完成出貨（歷史）目前選的月份 'YYYY-MM'
   const [toast, setToast] = useState(null)
   const [pendingOrderData, setPendingOrderData] = useState(null)
   const [formError, setFormError] = useState('')
@@ -198,7 +197,28 @@ export default function OrdersPage({ user }) {
     return Number(o.quantity)
   }
   const sortedOrders = useMemo(() => [...orders].sort((a, b) => new Date(b.created_at) - new Date(a.created_at)), [orders])
-  const filteredOrders = sortedOrders.filter(o => o.status === activeTab && (o.item_name || o.itemName || '').includes(filterFlavor))
+
+  // 完成出貨＝歷史出貨：依出貨日的月份分類（沒填出貨日就用最後更新日）
+  const monthOf = o => {
+    const td = String(o.target_date || o.targetDate || '')
+    if (/^\d{4}-\d{2}/.test(td)) return td.slice(0, 7)
+    const u = String(o.updated_at || o.created_at || '')
+    return /^\d{4}-\d{2}/.test(u) ? u.slice(0, 7) : '未知'
+  }
+  const shipMonths = useMemo(() => {
+    const m = {}
+    orders.filter(o => o.status === 'shipped').forEach(o => { const k = monthOf(o); m[k] = (m[k] || 0) + 1 })
+    return Object.entries(m).sort((a, b) => (a[0] === '未知') - (b[0] === '未知') || b[0].localeCompare(a[0])) // 新→舊
+  }, [orders])
+  const curShipMonth = shipMonths.some(([k]) => k === shipMonth) ? shipMonth : (shipMonths[0]?.[0] || '')
+
+  // 搜尋口味或客戶；在完成出貨分頁有輸入搜尋時，查全部月份
+  const kw = filterFlavor.trim()
+  const filteredOrders = sortedOrders
+    .filter(o => o.status === activeTab)
+    .filter(o => !kw || (o.item_name || o.itemName || '').includes(kw) || (o.customer_name || o.customerName || '').includes(kw))
+    .filter(o => activeTab !== 'shipped' || kw || monthOf(o) === curShipMonth)
+    .sort((a, b) => activeTab === 'shipped' ? String(b.target_date || '').localeCompare(String(a.target_date || '')) : 0)
   const groupedByCustomer = filteredOrders.reduce((acc, o) => {
     const fullName = o.customer_name || o.customerName || '未知客戶'
     const parentKey = fullName.includes('-') ? fullName.split('-')[0] : fullName
@@ -210,23 +230,6 @@ export default function OrdersPage({ user }) {
   }, {})
 
   const formatDate = d => d ? `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}` : ''
-  const getNextWeekRange = date => {
-    const d = new Date(date), day = d.getDay()
-    const nMon = new Date(d); nMon.setDate(d.getDate() + ((8 - day) % 7 || 7))
-    const nFri = new Date(nMon); nFri.setDate(nMon.getDate() + 4)
-    return { start: nMon, end: nFri }
-  }
-  const nextWeek = getNextWeekRange(selectedDate)
-  const nextWeekSummary = sortedOrders.filter(o => { const td = o.target_date||o.targetDate; if (!td) return false; const d = new Date(td); return d >= nextWeek.start && d <= nextWeek.end }).reduce((acc, o) => { const iName = o.item_name||o.itemName||''; if (!acc[iName]) acc[iName] = { qty: 0 }; acc[iName].qty += Number(o.quantity); return acc }, {})
-  const customerSummary = sortedOrders.filter(o => (o.target_date||o.targetDate) === formatDate(selectedDate)).reduce((acc, o) => { const cName = o.customer_name||o.customerName||'未知客戶'; if (!acc[cName]) acc[cName] = { items: [], total: 0 }; acc[cName].items.push(o); acc[cName].total += Number(o.quantity); return acc }, {})
-  const calendarData = useMemo(() => {
-    const year = currentMonth.getFullYear(), month = currentMonth.getMonth()
-    const firstDay = new Date(year, month, 1).getDay(), totalDays = new Date(year, month + 1, 0).getDate()
-    const days = []
-    for (let i = 0; i < firstDay; i++) days.push(null)
-    for (let i = 1; i <= totalDays; i++) days.push(new Date(year, month, i))
-    return days
-  }, [currentMonth])
 
   const THEME = {
     pending:   { bg: '#fffbeb', header: '#f59e0b', accent: '#92400e', border: '#fde68a' },
@@ -234,7 +237,6 @@ export default function OrdersPage({ user }) {
     scheduled: { bg: '#f0fdf4', header: '#10b981', accent: '#065f46', border: '#a7f3d0' },
     prepared:  { bg: '#eff6ff', header: '#3b82f6', accent: '#1e3a8a', border: '#bfdbfe' },
     shipped:   { bg: '#f8fafc', header: '#64748b', accent: '#1e293b', border: '#e2e8f0' },
-    stats:     { bg: '#fff1f2', header: '#f43f5e', accent: '#881337', border: '#fecdd3' },
   }
   const th = THEME[activeTab] || THEME.pending
 
@@ -256,9 +258,17 @@ export default function OrdersPage({ user }) {
         </div>
       </div>
 
-      <div style={{ maxWidth: 600, margin: '0 auto', padding: '12px 16px' }}>
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', background: 'rgba(255,255,255,.5)', borderRadius: 16, padding: 4, marginBottom: 12, gap: 4 }}>
-          {[...STATES.map(s => [s, STAGE[s].tab, STAGE[s].dept]), ['stats', '日曆統計', '']].map(([t, l, dept]) => (
+      {/* 版面：手機 分頁3+2、卡片1欄；電腦 分頁1列、卡片2欄 */}
+      <style>{`
+        .op-wrap { max-width: 1200px; margin: 0 auto; padding: 12px 16px; }
+        .op-tabs { display: grid; grid-template-columns: repeat(3, 1fr); }
+        .op-cards { column-gap: 16px; }
+        @media (min-width: 760px) { .op-tabs { grid-template-columns: repeat(5, 1fr); } }
+        @media (min-width: 900px) { .op-cards { columns: 2; } }
+      `}</style>
+      <div className="op-wrap">
+        <div className="op-tabs" style={{ background: 'rgba(255,255,255,.5)', borderRadius: 16, padding: 4, marginBottom: 12, gap: 4 }}>
+          {STATES.map(s => [s, STAGE[s].tab, STAGE[s].dept]).map(([t, l, dept]) => (
             <button key={t} onClick={() => setActiveTab(t)} style={{ padding: '8px 4px', borderRadius: 12, border: 'none', fontSize: 14, fontWeight: 700, lineHeight: 1.35, cursor: 'pointer', fontFamily: 'inherit', background: activeTab === t ? th.header : 'transparent', color: activeTab === t ? '#fff' : '#94a3b8' }}>
               <div>{l}</div>
               {dept && <div style={{ fontSize: 11, fontWeight: 500, opacity: 0.85 }}>({dept})</div>}
@@ -266,20 +276,38 @@ export default function OrdersPage({ user }) {
           ))}
         </div>
 
-        {activeTab !== 'stats' && (
-          <input type="text" placeholder="🔍 篩選口味..." value={filterFlavor} onChange={e => setFilterFlavor(e.target.value)} style={{ width: '100%', background: 'rgba(255,255,255,.8)', border: 'none', borderRadius: 16, padding: '12px 16px', fontSize: 15, fontWeight: 700, marginBottom: 12, fontFamily: 'inherit' }} />
+        <input type="text" placeholder={activeTab === 'shipped' ? '🔍 搜尋口味或客戶（查全部月份）...' : '🔍 篩選口味或客戶...'} value={filterFlavor} onChange={e => setFilterFlavor(e.target.value)} style={{ width: '100%', background: 'rgba(255,255,255,.8)', border: 'none', borderRadius: 16, padding: '12px 16px', fontSize: 15, fontWeight: 700, marginBottom: 12, fontFamily: 'inherit' }} />
+
+        {/* 完成出貨：月份分類（歷史出貨） */}
+        {activeTab === 'shipped' && shipMonths.length > 0 && (
+          <div style={{ marginBottom: 12 }}>
+            <div style={{ display: 'flex', gap: 6, overflowX: 'auto', paddingBottom: 4 }}>
+              {shipMonths.map(([k, n]) => {
+                const on = !kw && k === curShipMonth
+                return (
+                  <button key={k} onClick={() => { setShipMonth(k); setFilterFlavor('') }} style={{ flex: '0 0 auto', padding: '6px 12px', borderRadius: 20, border: `1px solid ${on ? th.header : '#e2e8f0'}`, background: on ? th.header : '#fff', color: on ? '#fff' : '#475569', fontWeight: 700, fontSize: 14, cursor: 'pointer', fontFamily: 'inherit', whiteSpace: 'nowrap' }}>
+                    {k === '未知' ? '未填日期' : k.replace('-', '/')} · {n}筆
+                  </button>
+                )
+              })}
+            </div>
+            {filteredOrders.length > 0 && (
+              <div style={{ marginTop: 8, fontSize: 14, color: '#475569', fontWeight: 700 }}>
+                {kw ? `搜尋「${kw}」（全部月份）` : `${curShipMonth === '未知' ? '未填日期' : curShipMonth.replace('-', '/')} 出貨合計`}：{filteredOrders.length} 筆 · {filteredOrders.reduce((s, o) => s + (Number(o.quantity) || 0), 0)} 袋 · {filteredOrders.reduce((s, o) => s + getBoxCount(o), 0)} 箱
+              </div>
+            )}
+          </div>
         )}
 
-        {activeTab !== 'stats' ? (
-          Object.keys(groupedByCustomer).length === 0
+        {Object.keys(groupedByCustomer).length === 0
             ? <div style={{ textAlign: 'center', padding: '60px 0', color: '#94a3b8', fontStyle: 'italic' }}>目前無資料</div>
-            : Object.entries(groupedByCustomer).map(([parentName, group]) => {
+            : <div className="op-cards">{Object.entries(groupedByCustomer).map(([parentName, group]) => {
               const allOrders = group.all || []
               const subGroups = group.subGroups || { [parentName]: allOrders }
               const totalQty = allOrders.reduce((s, o) => s + Number(o.quantity), 0)
               const hasMultipleSub = Object.keys(subGroups).length > 1
               return (
-              <div key={parentName} style={{ background: '#fff', borderRadius: 24, border: `1px solid ${th.border}`, overflow: 'hidden', marginBottom: 16 }}>
+              <div key={parentName} style={{ background: '#fff', borderRadius: 24, border: `1px solid ${th.border}`, overflow: 'hidden', marginBottom: 16, breakInside: 'avoid' }}>
                 {/* 母客戶標題列 */}
                 <div style={{ background: th.header, padding: '10px 16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                   <span style={{ fontSize: 16, fontWeight: 900, color: '#fff' }}>{parentName}</span>
@@ -344,14 +372,16 @@ export default function OrdersPage({ user }) {
                           <button onClick={() => openEditForm(o)} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 16, color: '#94a3b8', padding: '4px 6px' }}>✏️</button>
                           <button onClick={() => deleteOrder(o.id)} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 16, color: '#94a3b8', padding: '4px 6px' }}>🗑️</button>
                           <button onClick={() => changeStatus(o, -1)} disabled={o.status === 'pending'} style={{ background: '#fff', border: '1px solid #e2e8f0', borderRadius: 8, cursor: 'pointer', padding: '4px 8px', fontSize: 11, color: o.status === 'pending' ? '#e2e8f0' : '#475569' }}>退回上一狀態</button>
+                          {NEXT_ACTION[o.status] && (
                           <button onClick={() => {
                             const idx = STATES.indexOf(o.status)
                             if (idx < 0 || o.status === 'shipped') return
                             setStatusDate(formatDate(new Date()))
                             setStatusModal({ order: o, nextStatus: STATES[idx + 1], label: NEXT_ACTION[o.status] })
                           }} style={{ background: th.header, color: '#fff', border: 'none', borderRadius: 8, cursor: 'pointer', padding: '6px 14px', fontWeight: 700, fontSize: 14 }}>
-                            {NEXT_ACTION[o.status] || '維持現狀'} ›
+                            {NEXT_ACTION[o.status]} ›
                           </button>
+                          )}
                         </div>
                       </div>
                     </div>
@@ -371,68 +401,7 @@ export default function OrdersPage({ user }) {
                   </div>
                 )}
               </div>
-            )})
-        ) : (
-          <div>
-            <div style={{ background: '#fff', borderRadius: 24, padding: 20, marginBottom: 12 }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-                <button onClick={() => setCurrentMonth(new Date(currentMonth.getFullYear(), currentMonth.getMonth() - 1))} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 18, color: th.header }}>‹</button>
-                <div style={{ fontWeight: 900, fontSize: 16 }}>{currentMonth.getFullYear()}年 {currentMonth.getMonth() + 1}月</div>
-                <button onClick={() => setCurrentMonth(new Date(currentMonth.getFullYear(), currentMonth.getMonth() + 1))} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 18, color: th.header }}>›</button>
-              </div>
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7,1fr)', gap: 4, textAlign: 'center' }}>
-                {['日', '一', '二', '三', '四', '五', '六'].map(d => <div key={d} style={{ fontSize: 13, color: '#94a3b8', paddingBottom: 4 }}>{d}</div>)}
-                {calendarData.map((d, i) => {
-                  if (!d) return <div key={`e${i}`}></div>
-                  const ds = formatDate(d), isSel = selectedDate && ds === formatDate(selectedDate)
-                  const cnt = orders.filter(o => (o.target_date||o.targetDate) === ds).length
-                  return (
-                    <button key={ds} onClick={() => setSelectedDate(d)} style={{ aspectRatio: '1', borderRadius: 12, border: 'none', cursor: 'pointer', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', background: isSel ? th.header : 'transparent', color: isSel ? '#fff' : '#1e293b', fontWeight: isSel ? 900 : 400 }}>
-                      <span style={{ fontSize: 14 }}>{d.getDate()}</span>
-                      {cnt > 0 && <div style={{ width: 5, height: 5, borderRadius: '50%', background: isSel ? '#fff' : th.header, marginTop: 1 }}></div>}
-                    </button>
-                  )
-                })}
-              </div>
-            </div>
-            {selectedDate && (
-              <>
-                <div style={{ background: th.header, borderRadius: 20, padding: 20, marginBottom: 12, color: '#fff' }}>
-                  <div style={{ fontWeight: 900, fontSize: 15, marginBottom: 12, borderBottom: 'rgba(255,255,255,.3) solid 1px', paddingBottom: 8 }}>本週出貨總計（{formatDate(nextWeek.start)} ~ {formatDate(nextWeek.end)}）</div>
-                  {Object.entries(nextWeekSummary).map(([name, data]) => (
-                    <div key={name} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: 'rgba(255,255,255,.1)', padding: '10px 12px', borderRadius: 12, marginBottom: 6 }}>
-                      <span style={{ fontWeight: 700 }}>{name}</span>
-                      <div style={{ fontWeight: 900, fontSize: 18 }}>{data.qty} <span style={{ fontSize: 13 }}>袋</span></div>
-                    </div>
-                  ))}
-                  {Object.keys(nextWeekSummary).length === 0 && <p style={{ textAlign: 'center', opacity: .6 }}>無紀錄</p>}
-                </div>
-                <div style={{ background: '#fff', borderRadius: 20, padding: 20 }}>
-                  <div style={{ fontWeight: 900, fontSize: 15, marginBottom: 12, borderBottom: '1px solid #f1f5f9', paddingBottom: 8 }}>📦 理貨清單 — {formatDate(selectedDate)}</div>
-                  {Object.entries(customerSummary).map(([name, data]) => (
-                    <div key={name} style={{ border: '1px solid #f1f5f9', borderRadius: 16, overflow: 'hidden', marginBottom: 10 }}>
-                      <div style={{ background: '#f8fafc', padding: '8px 14px', display: 'flex', justifyContent: 'space-between', fontWeight: 700, fontSize: 15 }}>
-                        <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-                          {name}
-                          {(data.items[0]?.shipping_mark||data.items[0]?.shippingMark) && <span style={{ fontSize: 11, background: '#fef2f2', color: '#ef4444', padding: '1px 5px', borderRadius: 4 }}>麥頭</span>}
-                          {data.items[0]?.color_mark && <span style={{ fontSize: 11, background: '#fdf4ff', color: '#7e22ce', padding: '1px 5px', borderRadius: 4 }}>彩色{data.items[0]?.color_mark_note ? `(${data.items[0].color_mark_note})` : ''}</span>}
-                        </div>
-                        <span>{data.total} 袋</span>
-                      </div>
-                      {data.items.map(item => (
-                        <div key={item.id} style={{ padding: '8px 14px', display: 'flex', justifyContent: 'space-between', borderTop: '1px solid #f8fafc', fontSize: 14 }}>
-                          <span style={{ color: '#475569' }}>{item.item_name||item.itemName}</span>
-                          <span style={{ color: th.header, fontWeight: 700 }}>{item.quantity} 袋</span>
-                        </div>
-                      ))}
-                    </div>
-                  ))}
-                  {Object.keys(customerSummary).length === 0 && <p style={{ textAlign: 'center', color: '#94a3b8' }}>當日無出貨紀錄</p>}
-                </div>
-              </>
-            )}
-          </div>
-        )}
+            )})}</div>}
       </div>
 
       {/* 設定 */}
