@@ -22,32 +22,33 @@ export default function SalesPage() {
   const [editEvt, setEditEvt] = useState(null)
 
   const allFlavors = saleData.map(r => r.f)
-  const mainRows = saleData.filter(r => r.isMain)
-  const subRows = saleData.filter(r => !r.isMain)
+  // 每列帶著自己在 saleData 的原始位置 i，新增口味後主/副產品才不會對錯列（改到紅燒、刪錯列）
+  const rowsWithIdx = saleData.map((r, i) => ({ ...r, i }))
+  const mainRows = rowsWithIdx.filter(r => r.isMain)
+  const subRows = rowsWithIdx.filter(r => !r.isMain)
 
-  const update = (i, k, v) => {
-    const n = [...saleData]
-    n[i] = { ...n[i], [k]: v }
-    setSaleData(n)
-  }
+  const update = (i, k, v) => setSaleData(d => { const n = [...d]; n[i] = { ...n[i], [k]: v }; return n })
   const addFlavor = () => {
-    if (!newFlavor.trim()) return
-    setSaleData(d => [...d, { f: newFlavor.trim(), d: 0, m: 0, isMain: true }])
+    const name = newFlavor.trim()
+    if (!name) return
+    if (saleData.some(r => r.f === name)) { alert(`「${name}」已經在清單裡了`); return }
+    setSaleData(d => [...d, { f: name, d: 0, m: 0, isMain: true }])
     setNewFlavor('')
   }
 
-  const SaleRows = ({ rows, startIdx, title }) => (
+  // 注意：用 {SaleRows({...})} 呼叫，不要寫成 <SaleRows/>，否則每打一個字整列重建、游標跳掉
+  const SaleRows = ({ rows, title }) => (
     <>
       <tr><td colSpan={4} className="sec-head">{title}</td></tr>
-      {rows.map((r, ri) => {
-        const i = startIdx + ri
+      {rows.map(r => {
+        const i = r.i
         return (
           <tr key={r.f}>
             <td style={{ fontWeight: 700, fontSize: 16 }}>{r.f}</td>
             <td style={{ textAlign: 'right' }}>
               <input
                 type="number" step="0.001" value={r.d}
-                onChange={e => update(i, 'd', parseFloat(e.target.value) || 0)}
+                onChange={e => update(i, 'd', e.target.value)}
                 className="inp" style={{ width: 90, textAlign: 'right', fontSize: 16 }}
               />
               <span style={{ fontSize: 14, color: '#94a3b8', marginLeft: 4 }}>包</span>
@@ -55,7 +56,7 @@ export default function SalesPage() {
             <td style={{ textAlign: 'right' }}>
               <input
                 type="number" step="1" value={r.m}
-                onChange={e => update(i, 'm', parseFloat(e.target.value) || 0)}
+                onChange={e => update(i, 'm', e.target.value)}
                 className="inp" style={{ width: 90, textAlign: 'right', fontSize: 16 }}
               />
               <span style={{ fontSize: 14, color: '#94a3b8', marginLeft: 4 }}>包</span>
@@ -86,8 +87,8 @@ export default function SalesPage() {
               <th style={{ width: 55, textAlign: 'center', fontSize: 14 }}>操作</th>
             </tr></thead>
             <tbody>
-              <SaleRows rows={mainRows} startIdx={0} title="主產品（水餃・餡餅・湯包）" />
-              <SaleRows rows={subRows} startIdx={mainRows.length} title="副產品" />
+              {SaleRows({ rows: mainRows, title: '主產品（水餃・餡餅・湯包）' })}
+              {SaleRows({ rows: subRows, title: '副產品' })}
             </tbody>
           </table>
         </div>
