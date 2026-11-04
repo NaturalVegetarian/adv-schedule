@@ -35,7 +35,6 @@ function diffInv(p, c) {
   return out
 }
 
-const totalD = FL_MAIN.reduce((s,f) => s + DAILY[f], 0)
 
 function gc(v,mn){if(v<=0)return'g';const r=v/mn;if(r<0.3)return'r';if(r<1)return'w';if(r<1.5)return'l';if(r<2.5)return'o';return'f'}
 const BG={f:'#f0fdf4',o:'#f0fdf4',l:'#fefce8',w:'#fff7ed',r:'#fef2f2',g:'#f8fafc'}
@@ -62,8 +61,15 @@ export default function InventoryPage() {
   const [toast, setToast] = useState(null)
   const flash = m => { setToast(m); setTimeout(() => setToast(null), 2500) }
 
+  // 銷售比、每日消耗：跟銷售計畫的「每日預估」連動（和 Excel 一樣），銷售計畫沒存檔才用預設值
+  const [salesD, setSalesD] = useState(null)
+  const daily = salesD ? { ...DAILY, ...salesD } : DAILY
+  const sumD = FL_MAIN.reduce((s, f) => s + (daily[f] || 0), 0)
+
   useEffect(() => {
     (async () => {
+      const s = await loadPage('sales')
+      if (s.data?.data?.saleData) setSalesD(Object.fromEntries(s.data.data.saleData.map(r => [r.f, Number(r.d) || 0])))
       const { data, error } = await loadPage('inventory')
       if (error) { setLoadError(error.message); return }
       if (data?.data) {
@@ -94,7 +100,7 @@ export default function InventoryPage() {
   }
 
   // 主產品：公式自動算；有手動填值就用手動值
-  const autoMax = f => Math.round(MAX_CAP * (DAILY[f]/totalD) * (1+(bonus[f]||0)/100))
+  const autoMax = f => Math.round(MAX_CAP * (sumD ? (daily[f]||0)/sumD : 0) * (1+(bonus[f]||0)/100))
   const calcMax = f => FL_MAIN.includes(f)
     ? (mxMain[f] !== '' && mxMain[f] != null ? (Number(mxMain[f]) || 0) : autoMax(f))
     : (mxSub[f] || 300)
@@ -126,7 +132,7 @@ export default function InventoryPage() {
                 <span style={{fontSize:12,color:'#94a3b8',minWidth:32}}>{pct}%</span>
               </div>
             </td>
-            <td style={{textAlign:'right',color:'#94a3b8',fontSize:13}}>{DAILY[f]}包/日</td>
+            <td style={{textAlign:'right',color:'#94a3b8',fontSize:13}}>{Math.round((daily[f]||0)*10)/10}包/日</td>
             <td><span className="bdg" style={{background:BG[cls],color:TC[cls],fontSize:13}}>{LBL[cls]}</span></td>
           </tr>
         )
@@ -139,7 +145,7 @@ export default function InventoryPage() {
       <tr><td colSpan={5} className="sec-head">{title}</td></tr>
       {flavors.map(f => {
         const isMain = FL_MAIN.includes(f)
-        const ratio  = isMain ? (DAILY[f]/totalD*100).toFixed(2) : null
+        const ratio  = isMain ? (sumD ? (daily[f]||0)/sumD*100 : 0).toFixed(2) : null
         const mx     = calcMax(f)
         return (
           <tr key={f}>
@@ -235,6 +241,7 @@ export default function InventoryPage() {
         </div>
         <div style={{background:'#f8fafc',border:'1px solid #e2e8f0',borderRadius:8,padding:'10px 14px',marginBottom:14,fontSize:13,color:'#64748b',lineHeight:1.8}}>
           庫存上限 = 最高容量（12,000包）× 銷售比 × （1 + 上限增益%）<br/>
+          銷售比、每日消耗{salesD ? '依「銷售計畫」的每日預估自動計算' : '目前用預設值（銷售計畫存檔後會自動改用銷售計畫的每日預估）'}<br/>
           主產品的庫存上限也可以直接手動輸入；清空（或按「恢復自動」）就回到公式自動計算<br/>
           副產品沒有銷售比，庫存上限請直接手動輸入
         </div>

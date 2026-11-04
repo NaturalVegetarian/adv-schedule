@@ -1,6 +1,6 @@
 import { useState, useMemo, useCallback, useEffect } from 'react'
 import { supabase } from '../lib/supabase'
-import { fmtDT } from '../lib/pageSave'
+import { fmtDT, loadPage } from '../lib/pageSave'
 
 const PPB = { '黃金':240,'泡菜':240,'咖哩':240,'素花':230,'新鮮':320,'剝皮':330,'酸白':330,'原味':400,'紅燒':87,'藥膳':79,'珍菇':77,'香羹':105,'猴菇':100,'油飯':70 }
 const MAIN = ['黃金','泡菜','咖哩','素花','新鮮','剝皮','酸白','原味']
@@ -74,13 +74,14 @@ function makeDates(startStr, count = 45) {
   for (let i = 0; i < count; i++) {
     const d = new Date(B0.getFullYear(), B0.getMonth(), B0.getDate() + i)
     const m = d.getMonth()+1, dy = d.getDate(), w = d.getDay()
-    dates.push({ k: `${m}/${dy}`, lb: `${m}/${dy} 週${WD[w]}`, mo: m, we: w===0||w===6, dt: d })
+    const iso = `${d.getFullYear()}-${String(m).padStart(2,'0')}-${String(dy).padStart(2,'0')}`
+    dates.push({ k: `${m}/${dy}`, lb: `${m}/${dy} 週${WD[w]}`, mo: m, we: w===0||w===6, dt: d, iso })
   }
   return dates
 }
 
 function nm(s) { if (!s) return null; const p = s.replace(/\s/g,'').split('/'); if (p.length!==2) return null; return `${parseInt(p[0])}/${parseInt(p[1])}` }
-function gc(v,mn) { if(v<=0)return'c-gray'; const r=v/mn; if(r<0.3)return'c-red'; if(r<1)return'c-warn'; if(r<1.5)return'c-low'; if(r<2.5)return'c-ok'; return'c-full' }
+function gc(v,mn,mx) { if(v<=0)return'c-gray'; if(mx>0&&v>=mx)return'c-full'; const r=v/mn; if(r<0.3)return'c-red'; if(r<1)return'c-warn'; if(r<1.5)return'c-low'; if(r<2.5)return'c-ok'; return'c-full' }
 function gb(v,mn) { return Math.min(100, Math.round(v/mn*50)) }
 
 export default function SchedulePage() {
@@ -154,7 +155,57 @@ export default function SchedulePage() {
     else { setLastSaved(new Date().toISOString()); showToast('排程已儲存 ✅') }
   }
 
-  const DATES = useMemo(() => makeDates(startDate), [startDate])
+  // ── 連動銷售計畫、庫存狀況（照 Excel：前一天庫存 − 每日預估銷售量 ＋ 當天入庫）──
+  const [linked, setLinked] = useState({ sales: null, inventory: null })
+  useEffect(() => {
+    (async () => {
+      const [s, i] = await Promise.all([loadPage('sales'), loadPage('inventory')])
+      setLinked({ sales: s.data?.data || null, inventory: i.data?.data || null })
+    })()
+  }, [])
+
+  // 各口味實際使用的參數：有存檔就用銷售計畫／庫存狀況，沒有才用 ⚙ 庫存設定
+  const eff = useMemo(() => {
+    const s = linked.sales, inv = linked.inventory
+    const sd = Object.fromEntries((s?.saleData || []).map(r => [r.f, r]))
+    const mainSum = MAIN.reduce((t, f) => t + (Number(sd[f]?.d) || 0), 0)
+    const out = {}
+    FL.forEach(f => {
+      const b = bi[f] || { c: 0, mn: 0, mx: 0, d: 0 }
+      const d  = sd[f] ? (Number(sd[f].d) || 0) : b.d
+      const mn = sd[f] ? (Number(sd[f].m) || 0) : b.mn
+      const c  = inv?.inv && inv.inv[f] != null ? (Number(inv.inv[f]) || 0) : b.c
+      let mx = b.mx
+      if (inv) {
+        if (MAIN.includes(f)) {
+          const manual = inv.mxMain?.[f]
+          mx = manual !== '' && manual != null
+            ? (Number(manual) || 0)
+            : Math.round(12000 * (mainSum ? d / mainSum : 0) * (1 + (Number(inv.bonus?.[f]) || 0) / 100))
+        } else if (inv.mxSub?.[f] != null) mx = Number(inv.mxSub[f]) || b.mx
+      }
+      out[f] = { c, d, mn, mx }
+    })
+    return out
+  }, [bi, linked])
+
+  // 有庫存狀況的盤點日期 → 從盤點日隔天開始預估（和 Excel 一樣）
+  const invStart = useMemo(() => {
+    const m = String(linked.inventory?.date || '').match(/^(\d{4})\D(\d{1,2})\D(\d{1,2})/)
+    if (!m) return null
+    const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]) + 1)
+    return { key: `${d.getMonth()+1}/${d.getDate()}`, countDate: `${Number(m[2])}/${Number(m[3])}` }
+  }, [linked])
+  const effStart = invStart ? invStart.key : startDate
+
+  // 節日／活動加乘：活動期間內，受影響口味的每日預估 × 倍率（重疊取最大）
+  const multOf = useMemo(() => {
+    const evs = (linked.sales?.events || []).filter(e => e.start && e.end && Number(e.mult) > 0)
+    return (f, iso) => evs.reduce((m, e) =>
+      (iso >= e.start && iso <= e.end && (!e.items?.length || e.items.includes(f))) ? Math.max(m, Number(e.mult)) : m, 1)
+  }, [linked])
+
+  const DATES = useMemo(() => makeDates(effStart), [effStart])
 
   // 客訂出貨清單：依出貨日列在庫存表最右欄（只列出，不扣庫存——袋與包的換算待確認）
   // 出貨日已過但還沒完成出貨 → 標「逾期」列在第一天；沒填出貨日 → 標「未定」列在第一天；超出 45 天 → 不列
@@ -190,17 +241,16 @@ export default function SchedulePage() {
     })
     const res = {}
     FL.forEach(f => {
-      const b = bi[f]; if (!b) return
+      const b = eff[f]; if (!b) return
       let run = b.c
       res[f] = DATES.map(d => {
-        run -= b.d
-        if (im[d.k]?.[f]) run += im[d.k][f]
-        run = Math.max(0, run)
-        return { v: Math.round(run), p: !!(pm[d.k]?.has(f)) }
+        run -= b.d * multOf(f, d.iso)          // 每日預估銷售量（節日加乘）
+        if (im[d.k]?.[f]) run += im[d.k][f]    // 當天入庫
+        return { v: Math.round(run), p: !!(pm[d.k]?.has(f)) }  // 不設下限，負數＝缺貨量（同 Excel）
       })
     })
     return res
-  }, [schData, bi, DATES])
+  }, [schData, eff, multOf, DATES])
 
   const invTable = useMemo(() => cInv(), [cInv])
   const tot = schData.reduce((s, r) => s + (PPB[r.item]||0) * (r.barrels||0), 0)
@@ -226,9 +276,9 @@ export default function SchedulePage() {
       const priceWarn = new Set()
       highVeg.forEach(v => { Object.entries(ITEM_VEG).forEach(([item, veg]) => { if (veg === v.name) priceWarn.add(item) }) })
       const az = f => {
-        const b = bi[f]; if (!b || !data[f]) return { has: false }
+        const b = eff[f]; if (!b || !data[f]) return { has: false }
         let fw = -1, fr = -1
-        data[f].forEach(({ v }, di) => { const c = gc(v,b.mn); if(c==='c-warn'&&fw<0)fw=di; if((c==='c-red'||c==='c-gray')&&fr<0)fr=di })
+        data[f].forEach(({ v }, di) => { const c = gc(v,b.mn,b.mx); if(c==='c-warn'&&fw<0)fw=di; if((c==='c-red'||c==='c-gray')&&fr<0)fr=di })
         const di = fr>=0?fr:fw; const urg = fr>=0; const pbt = PPB[f]||240
         const ref = di>=3?data[f][di-3].v:b.c
         const need = Math.max(1, Math.ceil((b.mn*1.3-ref)/pbt))
@@ -242,10 +292,10 @@ export default function SchedulePage() {
       if (extraRules) { txt += `【補充規則】\n${extraRules}\n\n` }
       txt += '【主產品建議（水餃・餡餅・湯包）】\n'
       if (mi.length === 0) { txt += '✓ 45天內主產品庫存充足\n' }
-      else { mi.forEach(({ f, di, urg, need, pbt, pd }) => { const wd = DATES[di]?.lb||'—', sd = DATES[pd]?.lb||'—'; txt += `• ${urg?'[緊急]':'[偏低]'} ${f}：建議 ${sd} 前排 ${need} 桶（+${(need*pbt).toLocaleString()}包）\n  ${wd} 起庫存${urg?'緊急不足':'偏低'}。現 ${bi[f].c.toLocaleString()} 包，日耗 ${bi[f].d} 包，最低 ${bi[f].mn.toLocaleString()} 包。${priceWarn.has(f)?'⚠ 菜價偏高，請確認成本。':''}\n` }) }
+      else { mi.forEach(({ f, di, urg, need, pbt, pd }) => { const wd = DATES[di]?.lb||'—', sd = DATES[pd]?.lb||'—'; txt += `• ${urg?'[緊急]':'[偏低]'} ${f}：建議 ${sd} 前排 ${need} 桶（+${(need*pbt).toLocaleString()}包）\n  ${wd} 起庫存${urg?'緊急不足':'偏低'}。現 ${eff[f].c.toLocaleString()} 包，日耗 ${eff[f].d} 包，最低 ${eff[f].mn.toLocaleString()} 包。${priceWarn.has(f)?'⚠ 菜價偏高，請確認成本。':''}\n` }) }
       txt += '\n【副產品建議（搭配主產品同日排入）】\n'
       if (si.length === 0) { txt += '✓ 副產品庫存充足\n' }
-      else { si.forEach(({ f, di, urg, need, pbt, pd }) => { const wd = DATES[di]?.lb||'—', sd = DATES[pd]?.lb||'—'; txt += `• ${urg?'[緊急]':'[偏低]'} ${f}（副）：建議 ${sd} 前搭配 ${SP[f]||'主產品'}，排 ${need} 桶。\n  ${wd} 起庫存${urg?'不足':'偏低'}，現 ${bi[f].c.toLocaleString()} 包。\n` }) }
+      else { si.forEach(({ f, di, urg, need, pbt, pd }) => { const wd = DATES[di]?.lb||'—', sd = DATES[pd]?.lb||'—'; txt += `• ${urg?'[緊急]':'[偏低]'} ${f}（副）：建議 ${sd} 前搭配 ${SP[f]||'主產品'}，排 ${need} 桶。\n  ${wd} 起庫存${urg?'不足':'偏低'}，現 ${eff[f].c.toLocaleString()} 包。\n` }) }
       if (sok.length > 0) txt += `✓ 充足副產品：${sok.join('、')} 可彈性安排。\n`
       txt += '\n【原料群組建議】\n• 紅燒＋剝皮：共用根菜類原料，建議同批次節省換料\n• 素花系列：間隔不超過3天，越貴不貴\n• 副產品原則：主產品桶數少（1-2桶）時同日排入，不佔整天'
       setAiText(txt); setAiLoading(false)
@@ -284,8 +334,8 @@ export default function SchedulePage() {
       FL.forEach((f, fi) => {
         if (!invTable[f]) { h += `<td class="ic"></td>`; return }
         const { v, p } = invTable[f][di]
-        const b = bi[f] || { mn: 1 }
-        const cls = gc(v, b.mn); const pct = gb(v, b.mn)
+        const b = eff[f] || { mn: 1 }
+        const cls = gc(v, b.mn, b.mx); const pct = gb(v, b.mn)
         const fsub = fi === MAIN.length
         h += `<td class="ic ${cls}${p ? ' hp' : ''}" style="${fsub ? 'border-left:3px solid #94a3b8!important' : ''}"><div class="ci"><div class="cn">${v.toLocaleString()}</div><div class="bw"><div class="bf" style="width:${pct}%"></div></div></div></td>`
       })
@@ -295,7 +345,7 @@ export default function SchedulePage() {
     })
     h += '</tbody>'
     return h
-  }, [invTable, schData, bi, orderInfo, DATES])
+  }, [invTable, schData, eff, orderInfo, DATES])
 
   return (
     <div>
@@ -331,8 +381,12 @@ export default function SchedulePage() {
         <div className="card-title">
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
             庫存預估（自動更新）
-            {/* 起始日期 */}
-            {startDateEdit ? (
+            {/* 起始日期：有庫存狀況的盤點日就自動帶入 */}
+            {invStart ? (
+              <span style={{ fontSize: 12, color: '#94a3b8', padding: '2px 4px' }} title="要改起算日，請到庫存狀況修改盤點日期">
+                起算 {effStart}（庫存狀況盤點 {invStart.countDate} 的隔天）
+              </span>
+            ) : startDateEdit ? (
               <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
                 <span style={{ fontSize: 12, color: '#94a3b8' }}>起算：</span>
                 <input
@@ -377,10 +431,17 @@ export default function SchedulePage() {
           </div>
         </div>
 
+        {/* 連動來源 */}
+        <div style={{ fontSize: 12, color: '#64748b', margin: '-4px 0 8px', lineHeight: 1.8 }}>
+          計算方式：前一天庫存 − 每日預估銷售量（含節日加乘）＋ 當天入庫　｜
+          起始庫存、上限：{linked.inventory ? <strong style={{ color: '#059669' }}>庫存狀況</strong> : <span style={{ color: '#c2410c' }}>⚙ 庫存設定（庫存狀況尚未存檔）</span>}　｜
+          每日預估、最低庫存：{linked.sales ? <strong style={{ color: '#059669' }}>銷售計畫</strong> : <span style={{ color: '#c2410c' }}>⚙ 庫存設定（銷售計畫尚未存檔）</span>}
+        </div>
+
         {/* 庫存上限編輯 */}
         {biEdit && (
           <div style={{ marginBottom: 12, padding: 12, background: '#f8fafc', borderRadius: 10, border: '1px solid #e2e8f0' }}>
-            <div style={{ fontSize: 13, fontWeight: 700, color: '#475569', marginBottom: 8 }}>庫存設定（現有庫存 / 最低庫存 / 最高庫存 / 日耗量）</div>
+            <div style={{ fontSize: 13, fontWeight: 700, color: '#475569', marginBottom: 8 }}>庫存設定（備用值：只在銷售計畫、庫存狀況尚未存檔時使用）</div>
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(300px, 1fr))', gap: 6 }}>
               {FL.map(f => (
                 <div key={f} style={{ display: 'flex', alignItems: 'center', gap: 4, background: '#fff', padding: '6px 8px', borderRadius: 8, border: '1px solid #f1f5f9' }}>
@@ -403,7 +464,7 @@ export default function SchedulePage() {
         <div style={{ overflowX: 'auto', maxHeight: 380, overflowY: 'auto' }}>
           <table className="it" dangerouslySetInnerHTML={{ __html: invHTML }}></table>
         </div>
-        <div style={{ fontSize: 12, color: '#94a3b8', marginTop: 5 }}>粗框=當日入庫 · 條=庫存/最低庫存 · 雙線=月份 · ║=主∣副 · 最右欄=當日出貨客戶（只列出，不扣庫存）</div>
+        <div style={{ fontSize: 12, color: '#94a3b8', marginTop: 5 }}>粗框=當日入庫 · 條=庫存/最低庫存 · 雙線=月份 · ║=主∣副 · 負數=預估缺貨量 · 最右欄=當日出貨客戶（只列出，不扣庫存）</div>
       </div>
 
       {/* 排程輸入 */}
