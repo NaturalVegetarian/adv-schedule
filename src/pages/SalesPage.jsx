@@ -1,4 +1,5 @@
-import { useState } from 'react'
+import { useState, useEffect, useMemo } from 'react'
+import { loadPage, loadLogs, savePage, SaveBar, AdjustLog, LoadError, Toast } from '../lib/pageSave'
 
 const INIT_SALE = [
   { f: '黃金', d: 83, m: 1716, isMain: true }, { f: '泡菜', d: 38, m: 638, isMain: true },
@@ -15,11 +16,82 @@ const INIT_EVENTS = [
   { id: 2, name: '中秋節',   start: '2026-09-15', end: '2026-09-29', mult: 1.5, items: [] },
 ]
 
+// 存檔前統一轉成數字，方便比對與存放
+const norm = (saleData, events) => ({
+  saleData: saleData.map(r => ({ f: r.f, d: Number(r.d) || 0, m: Number(r.m) || 0, isMain: !!r.isMain })),
+  events: events.map(e => ({ id: e.id, name: e.name || '', start: e.start || '', end: e.end || '', mult: Number(e.mult) || 0, items: e.items || [] })),
+})
+
+// 比對上次存檔與目前內容，產生「調整了什麼」的文字
+function diffSales(prev, cur) {
+  const out = []
+  const pm = Object.fromEntries(prev.saleData.map(r => [r.f, r]))
+  const cm = Object.fromEntries(cur.saleData.map(r => [r.f, r]))
+  cur.saleData.forEach(r => {
+    const o = pm[r.f]
+    if (!o) { out.push(`新增口味「${r.f}」（每日預估 ${r.d}、最低庫存 ${r.m}）`); return }
+    if (o.d !== r.d) out.push(`${r.f} 每日預估 ${o.d} → ${r.d}`)
+    if (o.m !== r.m) out.push(`${r.f} 最低庫存 ${o.m} → ${r.m}`)
+  })
+  prev.saleData.forEach(r => { if (!cm[r.f]) out.push(`刪除口味「${r.f}」`) })
+  const evText = e => `${e.name || '（未命名）'}（${e.start || '?'}～${e.end || '?'}，×${e.mult}${e.items.length ? '，' + e.items.join('、') : ''}）`
+  const same = (a, b) => a.name === b.name && a.start === b.start && a.end === b.end && a.mult === b.mult && a.items.join('|') === b.items.join('|')
+  const pe = Object.fromEntries(prev.events.map(e => [e.id, e]))
+  const ce = Object.fromEntries(cur.events.map(e => [e.id, e]))
+  cur.events.forEach(e => {
+    const o = pe[e.id]
+    if (!o) out.push(`新增活動 ${evText(e)}`)
+    else if (!same(o, e)) out.push(`修改活動 ${evText(o)} → ${evText(e)}`)
+  })
+  prev.events.forEach(e => { if (!ce[e.id]) out.push(`刪除活動「${e.name}」`) })
+  return out
+}
+
 export default function SalesPage() {
   const [saleData, setSaleData] = useState(INIT_SALE)
   const [newFlavor, setNewFlavor] = useState('')
   const [events, setEvents] = useState(INIT_EVENTS)
   const [editEvt, setEditEvt] = useState(null)
+
+  // 存檔相關
+  const [saved, setSaved] = useState(() => norm(INIT_SALE, INIT_EVENTS))
+  const [lastSaved, setLastSaved] = useState(null)
+  const [logs, setLogs] = useState([])
+  const [loaded, setLoaded] = useState(false)
+  const [loadError, setLoadError] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [toast, setToast] = useState(null)
+  const flash = m => { setToast(m); setTimeout(() => setToast(null), 2500) }
+
+  useEffect(() => {
+    (async () => {
+      const { data, error } = await loadPage('sales')
+      if (error) { setLoadError(error.message); return }
+      if (data?.data) {
+        const n = norm(data.data.saleData || INIT_SALE, data.data.events || INIT_EVENTS)
+        setSaleData(n.saleData); setEvents(n.events); setSaved(n); setLastSaved(data.updated_at)
+      }
+      const lg = await loadLogs('sales')
+      setLogs(lg.data)
+      setLoaded(true)
+    })()
+  }, [])
+
+  const current = useMemo(() => norm(saleData, events), [saleData, events])
+  const changes = useMemo(() => diffSales(saved, current), [saved, current])
+
+  const onSave = async () => {
+    if (!loaded) return
+    if (changes.length === 0 && lastSaved) { flash('沒有需要存檔的變更'); return }
+    const ch = changes.length ? changes : ['首次存檔（沿用預設數值）']
+    setSaving(true)
+    const r = await savePage('sales', current, ch)
+    setSaving(false)
+    if (r.error) { alert('存檔失敗：' + r.error.message); return }
+    setSaved(current); setLastSaved(r.savedAt)
+    setLogs(l => [{ id: 'new-' + r.savedAt, created_at: r.savedAt, changes: ch }, ...l].slice(0, 50))
+    flash('已存檔 ✅')
+  }
 
   const allFlavors = saleData.map(r => r.f)
   // 每列帶著自己在 saleData 的原始位置 i，新增口味後主/副產品才不會對錯列（改到紅燒、刪錯列）
@@ -72,11 +144,14 @@ export default function SalesPage() {
 
   return (
     <div>
+      <Toast msg={toast} />
+      <LoadError error={loadError} />
+
       {/* 每日預估 + 最低庫存 */}
       <div className="card">
-        <div className="card-title">
-          每日預估銷售量 ／ 最低庫存量
-          <span style={{ fontSize: 14, color: '#94a3b8', fontWeight: 400 }}>行銷科填寫 · 單位：包</span>
+        <div className="card-title" style={{ flexWrap: 'wrap', gap: 8 }}>
+          <span>每日預估銷售量 ／ 最低庫存量 <span style={{ fontSize: 14, color: '#94a3b8', fontWeight: 400 }}>行銷科填寫 · 單位：包</span></span>
+          <SaveBar lastSaved={lastSaved} dirty={loaded && changes.length > 0} saving={saving} disabled={!loaded} onSave={onSave} />
         </div>
         <div style={{ overflowX: 'auto' }}>
           <table className="tbl">
@@ -98,12 +173,13 @@ export default function SalesPage() {
             style={{ flex: 1, fontSize: 15 }} onKeyDown={e => e.key === 'Enter' && addFlavor()} />
           <button className="btn btn-dark btn-sm" onClick={addFlavor} style={{ fontSize: 14 }}>新增口味</button>
         </div>
+        <AdjustLog logs={logs} />
       </div>
 
       {/* 節日加乘 */}
       <div className="card">
         <div className="card-title">
-          節日 ／ 活動加乘設定
+          <span>節日 ／ 活動加乘設定 <span style={{ fontSize: 13, color: '#94a3b8', fontWeight: 400 }}>修改後請按上方 💾 存檔</span></span>
           <button className="btn btn-dark btn-sm" style={{ fontSize: 14 }}
             onClick={() => setEditEvt({ id: Date.now(), name: '', start: '', end: '', mult: 1.5, items: [] })}>
             + 新增活動

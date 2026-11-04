@@ -1,4 +1,5 @@
-import { useState } from 'react'
+import { useState, useEffect, useMemo } from 'react'
+import { loadPage, loadLogs, savePage, SaveBar, AdjustLog, LoadError, Toast } from '../lib/pageSave'
 
 const FL_MAIN = ['黃金','泡菜','咖哩','素花','新鮮','剝皮','酸白','原味']
 const FL_SUB  = ['紅燒','藥膳','珍菇','香羹','猴菇','油飯']
@@ -9,6 +10,28 @@ const DAILY = {黃金:83,泡菜:38,咖哩:11,素花:60,新鮮:41,剝皮:53,酸�
 const INIT_CUR = {黃金:1941,泡菜:625,咖哩:680,素花:1754,新鮮:789,剝皮:1299,酸白:618,原味:1585,紅燒:70,藥膳:31,珍菇:50,香羹:26,猴菇:69,油飯:60}
 const INIT_MN  = {黃金:1716,泡菜:638,咖哩:347,素花:1194,新鮮:571,剝皮:888,酸白:424,原味:337,紅燒:100,藥膳:30,珍菇:50,香羹:100,猴菇:50,油飯:50}
 const INIT_MX_SUB = {紅燒:300,藥膳:200,珍菇:200,香羹:200,猴菇:200,油飯:150}
+
+const todayStr = () => { const t = new Date(); return `${t.getFullYear()}/${String(t.getMonth()+1).padStart(2,'0')}/${String(t.getDate()).padStart(2,'0')}` }
+
+// 存檔前統一格式，方便比對與存放
+const normInv = s => ({
+  date: s.date || '',
+  inv:    Object.fromEntries(ALL.map(f => [f, Number(s.inv?.[f]) || 0])),
+  bonus:  Object.fromEntries(FL_MAIN.map(f => [f, Number(s.bonus?.[f]) || 0])),
+  mxSub:  Object.fromEntries(FL_SUB.map(f => [f, Number(s.mxSub?.[f]) || 0])),
+  refill: Object.fromEntries(ALL.map(f => [f, s.refill?.[f] === '' || s.refill?.[f] == null ? '' : String(s.refill[f])])),
+})
+
+// 比對上次存檔與目前內容，產生「調整了什麼」的文字
+function diffInv(p, c) {
+  const out = []
+  if (p.date !== c.date) out.push(`盤點日期 ${p.date || '—'} → ${c.date || '—'}`)
+  ALL.forEach(f => { if (p.inv[f] !== c.inv[f]) out.push(`${f} 現有庫存 ${p.inv[f]} → ${c.inv[f]}`) })
+  FL_MAIN.forEach(f => { if (p.bonus[f] !== c.bonus[f]) out.push(`${f} 上限增益 ${p.bonus[f]}% → ${c.bonus[f]}%`) })
+  FL_SUB.forEach(f => { if (p.mxSub[f] !== c.mxSub[f]) out.push(`${f} 庫存上限 ${p.mxSub[f]} → ${c.mxSub[f]}`) })
+  ALL.forEach(f => { if (p.refill[f] !== c.refill[f]) out.push(`${f} 可補充 ${p.refill[f] || '—'}% → ${c.refill[f] || '—'}%`) })
+  return out
+}
 
 const totalD = FL_MAIN.reduce((s,f) => s + DAILY[f], 0)
 
@@ -21,10 +44,51 @@ const LBL={f:'充足',o:'充足',l:'偏低',w:'紅燈',r:'緊急',g:'灰燈'}
 export default function InventoryPage() {
   const [inv,  setInv]  = useState(INIT_CUR)
   const [mn,   setMn]   = useState(INIT_MN)
-  const [date, setDate] = useState(() => { const t = new Date(); return `${t.getFullYear()}/${String(t.getMonth()+1).padStart(2,'0')}/${String(t.getDate()).padStart(2,'0')}` })
+  const [date, setDate] = useState(todayStr)
   const [bonus,  setBonus]  = useState(Object.fromEntries(FL_MAIN.map(f=>[f,0])))
   const [mxSub,  setMxSub]  = useState(INIT_MX_SUB)
   const [refill, setRefill] = useState(Object.fromEntries(ALL.map(f=>[f,''])))
+
+  // 存檔相關
+  const [saved, setSaved] = useState(() => normInv({ date: todayStr(), inv: INIT_CUR, bonus: {}, mxSub: INIT_MX_SUB, refill: {} }))
+  const [lastSaved, setLastSaved] = useState(null)
+  const [logs, setLogs] = useState([])
+  const [loaded, setLoaded] = useState(false)
+  const [loadError, setLoadError] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [toast, setToast] = useState(null)
+  const flash = m => { setToast(m); setTimeout(() => setToast(null), 2500) }
+
+  useEffect(() => {
+    (async () => {
+      const { data, error } = await loadPage('inventory')
+      if (error) { setLoadError(error.message); return }
+      if (data?.data) {
+        const n = normInv(data.data)
+        setDate(n.date); setInv(n.inv); setBonus(n.bonus); setMxSub(n.mxSub); setRefill(n.refill)
+        setSaved(n); setLastSaved(data.updated_at)
+      }
+      const lg = await loadLogs('inventory')
+      setLogs(lg.data)
+      setLoaded(true)
+    })()
+  }, [])
+
+  const current = useMemo(() => normInv({ date, inv, bonus, mxSub, refill }), [date, inv, bonus, mxSub, refill])
+  const changes = useMemo(() => diffInv(saved, current), [saved, current])
+
+  const onSave = async () => {
+    if (!loaded) return
+    if (changes.length === 0 && lastSaved) { flash('沒有需要存檔的變更'); return }
+    const ch = changes.length ? changes : ['首次存檔（沿用預設數值）']
+    setSaving(true)
+    const r = await savePage('inventory', current, ch)
+    setSaving(false)
+    if (r.error) { alert('存檔失敗：' + r.error.message); return }
+    setSaved(current); setLastSaved(r.savedAt)
+    setLogs(l => [{ id: 'new-' + r.savedAt, created_at: r.savedAt, changes: ch }, ...l].slice(0, 50))
+    flash('已存檔 ✅')
+  }
 
   const calcMax = f => FL_MAIN.includes(f)
     ? Math.round(MAX_CAP * (DAILY[f]/totalD) * (1+(bonus[f]||0)/100))
@@ -108,6 +172,8 @@ export default function InventoryPage() {
 
   return (
     <div>
+      <Toast msg={toast} />
+      <LoadError error={loadError} />
       {/* 上方：庫存盤點（倉儲） */}
       <div className="card">
         <div className="card-title">
@@ -118,6 +184,7 @@ export default function InventoryPage() {
             <input type="text" value={date} onChange={e=>setDate(e.target.value)}
               className="inp" style={{width:110,fontSize:14}}/>
             <span style={{fontSize:13,color:'#94a3b8'}}>現有：{total.toLocaleString()}包</span>
+            <SaveBar lastSaved={lastSaved} dirty={loaded && changes.length > 0} saving={saving} disabled={!loaded} onSave={onSave} />
           </div>
         </div>
         <div style={{overflowX:'auto'}}>
@@ -143,13 +210,14 @@ export default function InventoryPage() {
             <span key={l} className="bdg" style={{background:bg,color:tc,fontSize:13}}>{l}</span>
           ))}
         </div>
+        <AdjustLog logs={logs} />
       </div>
 
       {/* 下方：滿福庫存上限設定（主管/行銷） */}
       <div className="card">
         <div className="card-title">
           滿福庫存上限設定
-          <span style={{fontSize:14,color:'#64748b',fontWeight:400}}>主管 / 行銷科填寫</span>
+          <span style={{fontSize:14,color:'#64748b',fontWeight:400}}>主管 / 行銷科填寫 · 修改後請按上方 💾 存檔</span>
         </div>
         <div style={{background:'#f8fafc',border:'1px solid #e2e8f0',borderRadius:8,padding:'10px 14px',marginBottom:14,fontSize:13,color:'#64748b',lineHeight:1.8}}>
           庫存上限 = 最高容量（12,000包）× 銷售比 × （1 + 上限增益%）<br/>

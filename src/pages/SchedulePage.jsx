@@ -1,5 +1,6 @@
 import { useState, useMemo, useCallback, useEffect } from 'react'
 import { supabase } from '../lib/supabase'
+import { fmtDT } from '../lib/pageSave'
 
 const PPB = { '黃金':240,'泡菜':240,'咖哩':240,'素花':230,'新鮮':320,'剝皮':330,'酸白':330,'原味':400,'紅燒':87,'藥膳':79,'珍菇':77,'香羹':105,'猴菇':100,'油飯':70 }
 const MAIN = ['黃金','泡菜','咖哩','素花','新鮮','剝皮','酸白','原味']
@@ -100,6 +101,7 @@ export default function SchedulePage() {
   const [orders, setOrders] = useState([])
   const [loaded, setLoaded] = useState(false)
   const [loadError, setLoadError] = useState('')
+  const [lastSaved, setLastSaved] = useState(null)
 
   const showToast = msg => { setToast(msg); setTimeout(() => setToast(null), 3000) }
 
@@ -115,6 +117,7 @@ export default function SchedulePage() {
         if (data.extra_rules) setExtraRules(data.extra_rules)
         if (data.bi) setBi({ ...DEFAULT_BI, ...data.bi })
         if (data.start_date) { setStartDate(data.start_date); setStartDateInput(data.start_date) }
+        if (data.updated_at) setLastSaved(data.updated_at)
       }
       setLoaded(true)
     }
@@ -148,7 +151,7 @@ export default function SchedulePage() {
     })
     setSaving(false)
     if (error) { alert('儲存失敗：' + error.message) }
-    else { showToast('排程已儲存 ✅') }
+    else { setLastSaved(new Date().toISOString()); showToast('排程已儲存 ✅') }
   }
 
   const DATES = useMemo(() => makeDates(startDate), [startDate])
@@ -408,7 +411,7 @@ export default function SchedulePage() {
         <div className="card-title">
           排程輸入
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <span style={{ fontSize: 13, color: '#64748b', fontWeight: 400 }}>合計 <strong style={{ color: '#1e293b' }}>{tot > 0 ? `${tot.toLocaleString()}包` : '—'}</strong></span>
+            <span style={{ fontSize: 13, color: '#64748b', fontWeight: 400 }}>上次存檔：{lastSaved ? <strong style={{ color: '#1e293b' }}>{fmtDT(lastSaved)}</strong> : '尚未存檔'} · 合計 <strong style={{ color: '#1e293b' }}>{tot > 0 ? `${tot.toLocaleString()}包` : '—'}</strong></span>
             <button
               onClick={save}
               disabled={saving}
