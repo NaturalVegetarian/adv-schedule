@@ -19,6 +19,7 @@ const normInv = s => ({
   inv:    Object.fromEntries(ALL.map(f => [f, Number(s.inv?.[f]) || 0])),
   bonus:  Object.fromEntries(FL_MAIN.map(f => [f, Number(s.bonus?.[f]) || 0])),
   mxSub:  Object.fromEntries(FL_SUB.map(f => [f, Number(s.mxSub?.[f]) || 0])),
+  mxMain: Object.fromEntries(FL_MAIN.map(f => [f, s.mxMain?.[f] === '' || s.mxMain?.[f] == null ? '' : String(s.mxMain[f])])), // 主產品手動上限，空白＝自動
   refill: Object.fromEntries(ALL.map(f => [f, s.refill?.[f] === '' || s.refill?.[f] == null ? '' : String(s.refill[f])])),
 })
 
@@ -28,6 +29,7 @@ function diffInv(p, c) {
   if (p.date !== c.date) out.push(`盤點日期 ${p.date || '—'} → ${c.date || '—'}`)
   ALL.forEach(f => { if (p.inv[f] !== c.inv[f]) out.push(`${f} 現有庫存 ${p.inv[f]} → ${c.inv[f]}`) })
   FL_MAIN.forEach(f => { if (p.bonus[f] !== c.bonus[f]) out.push(`${f} 上限增益 ${p.bonus[f]}% → ${c.bonus[f]}%`) })
+  FL_MAIN.forEach(f => { if (p.mxMain[f] !== c.mxMain[f]) out.push(`${f} 庫存上限 ${p.mxMain[f] || '自動'} → ${c.mxMain[f] || '自動'}`) })
   FL_SUB.forEach(f => { if (p.mxSub[f] !== c.mxSub[f]) out.push(`${f} 庫存上限 ${p.mxSub[f]} → ${c.mxSub[f]}`) })
   ALL.forEach(f => { if (p.refill[f] !== c.refill[f]) out.push(`${f} 可補充 ${p.refill[f] || '—'}% → ${c.refill[f] || '—'}%`) })
   return out
@@ -47,6 +49,7 @@ export default function InventoryPage() {
   const [date, setDate] = useState(todayStr)
   const [bonus,  setBonus]  = useState(Object.fromEntries(FL_MAIN.map(f=>[f,0])))
   const [mxSub,  setMxSub]  = useState(INIT_MX_SUB)
+  const [mxMain, setMxMain] = useState(Object.fromEntries(FL_MAIN.map(f=>[f,''])))
   const [refill, setRefill] = useState(Object.fromEntries(ALL.map(f=>[f,''])))
 
   // 存檔相關
@@ -65,7 +68,7 @@ export default function InventoryPage() {
       if (error) { setLoadError(error.message); return }
       if (data?.data) {
         const n = normInv(data.data)
-        setDate(n.date); setInv(n.inv); setBonus(n.bonus); setMxSub(n.mxSub); setRefill(n.refill)
+        setDate(n.date); setInv(n.inv); setBonus(n.bonus); setMxSub(n.mxSub); setMxMain(n.mxMain); setRefill(n.refill)
         setSaved(n); setLastSaved(data.updated_at)
       }
       const lg = await loadLogs('inventory')
@@ -74,7 +77,7 @@ export default function InventoryPage() {
     })()
   }, [])
 
-  const current = useMemo(() => normInv({ date, inv, bonus, mxSub, refill }), [date, inv, bonus, mxSub, refill])
+  const current = useMemo(() => normInv({ date, inv, bonus, mxSub, mxMain, refill }), [date, inv, bonus, mxSub, mxMain, refill])
   const changes = useMemo(() => diffInv(saved, current), [saved, current])
 
   const onSave = async () => {
@@ -90,8 +93,10 @@ export default function InventoryPage() {
     flash('已存檔 ✅')
   }
 
+  // 主產品：公式自動算；有手動填值就用手動值
+  const autoMax = f => Math.round(MAX_CAP * (DAILY[f]/totalD) * (1+(bonus[f]||0)/100))
   const calcMax = f => FL_MAIN.includes(f)
-    ? Math.round(MAX_CAP * (DAILY[f]/totalD) * (1+(bonus[f]||0)/100))
+    ? (mxMain[f] !== '' && mxMain[f] != null ? (Number(mxMain[f]) || 0) : autoMax(f))
     : (mxSub[f] || 300)
 
   const total = ALL.reduce((s,f) => s + (inv[f]||0), 0)
@@ -152,7 +157,16 @@ export default function InventoryPage() {
             </td>
             <td style={{textAlign:'right',fontWeight:700,fontSize:16}}>
               {isMain
-                ? mx.toLocaleString()
+                ? <div style={{display:'inline-flex',flexDirection:'column',alignItems:'flex-end',gap:2}}>
+                    <input type="number" value={mxMain[f] ?? ''} placeholder={String(autoMax(f))}
+                      onChange={e=>setMxMain(p=>({...p,[f]:e.target.value}))}
+                      className="inp" style={{width:95,textAlign:'right',fontSize:15,fontWeight:700}}/>
+                    <span style={{fontSize:11,fontWeight:400,color: mxMain[f] ? '#c2410c' : '#94a3b8'}}>
+                      {mxMain[f]
+                        ? <>手動（自動為 {autoMax(f).toLocaleString()}）<button onClick={()=>setMxMain(p=>({...p,[f]:''}))} style={{marginLeft:4,fontSize:11,border:'none',background:'none',color:'#2563eb',cursor:'pointer',padding:0}}>恢復自動</button></>
+                        : '自動計算'}
+                    </span>
+                  </div>
                 : <><input type="number" value={mxSub[f]||0}
                     onChange={e=>setMxSub(p=>({...p,[f]:+e.target.value}))}
                     className="inp" style={{width:85,textAlign:'right',fontSize:15}}/></>
@@ -221,6 +235,7 @@ export default function InventoryPage() {
         </div>
         <div style={{background:'#f8fafc',border:'1px solid #e2e8f0',borderRadius:8,padding:'10px 14px',marginBottom:14,fontSize:13,color:'#64748b',lineHeight:1.8}}>
           庫存上限 = 最高容量（12,000包）× 銷售比 × （1 + 上限增益%）<br/>
+          主產品的庫存上限也可以直接手動輸入；清空（或按「恢復自動」）就回到公式自動計算<br/>
           副產品沒有銷售比，庫存上限請直接手動輸入
         </div>
         <div style={{overflowX:'auto'}}>
