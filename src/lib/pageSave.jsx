@@ -28,6 +28,17 @@ export async function savePage(id, payload, changes) {
   return { error: null, savedAt: now }
 }
 
+// 只存資料、不寫紀錄（紀錄由呼叫端合併寫入）
+export async function savePageData(id, payload) {
+  return supabase.from('adv_page_config').upsert({ id, data: payload, updated_at: new Date().toISOString() })
+}
+
+// 只寫一筆調整紀錄（生產排程用，資料本身另外存）
+export async function addLog(page, changes) {
+  if (!changes || changes.length === 0) return { error: null }
+  return supabase.from('adv_adjust_log').insert({ page, changes, created_at: new Date().toISOString() })
+}
+
 // 存檔列：上次調整日期、未存檔提示、存檔按鈕
 export function SaveBar({ lastSaved, dirty, saving, disabled, onSave }) {
   return (
