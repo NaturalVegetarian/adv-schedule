@@ -1,41 +1,55 @@
-import { useState, useMemo, useCallback } from 'react'
+import { useState, useMemo, useCallback, useEffect } from 'react'
+import { supabase } from '../lib/supabase'
 
-const PPB = { '黃金':240,'泡菜':240,'咖哩':240,'素花':230,'新鮮':320,'剝皮':330,'酸白':330,'原味':400,'紅燒':87,'藥膳':79,'珍菇':77,'香薑':105,'猴菇':100,'油飯':70 }
+const PPB = { '黃金':240,'泡菜':240,'咖哩':240,'素花':230,'新鮮':320,'剝皮':330,'酸白':330,'原味':400,'紅燒':87,'藥膳':79,'珍菇':77,'香羹':105,'猴菇':100,'油飯':70 }
 const MAIN = ['黃金','泡菜','咖哩','素花','新鮮','剝皮','酸白','原味']
-const SUB  = ['紅燒','藥膳','珍菇','香薑','猴菇','油飯']
+const SUB  = ['紅燒','藥膳','珍菇','香羹','猴菇','油飯']
 const FL   = [...MAIN, ...SUB]
-const SP   = { '紅燒':'剝皮（共用根菜）','藥膳':'原味（同批）','珍菇':'新鮮（同日）','香薑':'黃金（相近）','猴菇':'泡菜（同日）','油飯':'素花（間隙）' }
+const SP   = { '紅燒':'剝皮（共用根菜）','藥膳':'原味（同批）','珍菇':'新鮮（同日）','香羹':'黃金（相近）','猴菇':'泡菜（同日）','油飯':'素花（間隙）' }
 const ITEM_VEG = { '黃金':'玉米','泡菜':'高麗菜','素花':'花椰菜','新鮮':'青江菜','酸白':'高麗菜','原味':'大白菜' }
 
-const BI = {
+const DEFAULT_BI = {
   '黃金':{c:1941,mn:1716,mx:2770,d:83},'泡菜':{c:625,mn:638,mx:1281,d:38},
   '咖哩':{c:680,mn:347,mx:562,d:11}, '素花':{c:1754,mn:1194,mx:2016,d:60},
   '新鮮':{c:789,mn:571,mx:1382,d:41},'剝皮':{c:1299,mn:888,mx:1771,d:53},
   '酸白':{c:618,mn:424,mx:920,d:28}, '原味':{c:1585,mn:337,mx:1484,d:44},
   '紅燒':{c:70,mn:100,mx:300,d:4},  '藥膳':{c:31,mn:30,mx:200,d:1},
-  '珍菇':{c:50,mn:50,mx:200,d:2},   '香薑':{c:26,mn:100,mx:200,d:6},
+  '珍菇':{c:50,mn:50,mx:200,d:2},   '香羹':{c:26,mn:100,mx:200,d:6},
   '猴菇':{c:69,mn:50,mx:200,d:1},   '油飯':{c:60,mn:50,mx:150,d:3},
 }
 
 const WD = ['日','一','二','三','四','五','六']
-const DATES = []
-const B0 = new Date('2026-05-08')
-for (let i = 0; i < 45; i++) {
-  const d = new Date(B0); d.setDate(d.getDate() + i)
-  const m = d.getMonth()+1, dy = d.getDate(), w = d.getDay()
-  DATES.push({ k: `${m}/${dy}`, lb: `${m}/${dy} 週${WD[w]}`, mo: m, we: w===0||w===6 })
+
+const INIT_SCH = []
+
+let _uid = 0
+const uid = () => `r${Date.now().toString(36)}${(_uid++).toString(36)}`
+const withIds = rows => (rows || []).map(r => (r.id ? r : { ...r, id: uid() }))
+
+function todayKey() { const t = new Date(); return `${t.getMonth()+1}/${t.getDate()}` }
+
+// M/D 轉成完整日期，自動判斷年份（距今超過半年就視為跨年）
+function resolveDate(m, d) {
+  const now = new Date()
+  let dt = new Date(now.getFullYear(), m - 1, d)
+  const diff = (dt - now) / 86400000
+  if (diff < -183) dt = new Date(now.getFullYear() + 1, m - 1, d)
+  else if (diff > 183) dt = new Date(now.getFullYear() - 1, m - 1, d)
+  return dt
 }
 
-function nm(s) { if (!s) return null; const p = s.replace(/\s/g,'').split('/'); if (p.length!==2) return null; return `${parseInt(p[0])}/${parseInt(p[1])}` }
-function gc(v,mn) { if(v<=0)return'c-gray'; const r=v/mn; if(r<0.3)return'c-red'; if(r<1)return'c-warn'; if(r<1.5)return'c-low'; if(r<2.5)return'c-ok'; return'c-full' }
-function gb(v,mn) { return Math.min(100, Math.round(v/mn*50)) }
+// 出貨日（YYYY-MM-DD 或 M/D）轉成 Date
+function parseShipDate(s) {
+  if (!s) return null
+  const iso = String(s).match(/^(\d{4})-(\d{1,2})-(\d{1,2})/)
+  if (iso) return new Date(Number(iso[1]), Number(iso[2]) - 1, Number(iso[3]))
+  const md = String(s).replace(/\s/g, '').match(/^(\d{1,2})\/(\d{1,2})$/)
+  if (md) return resolveDate(Number(md[1]), Number(md[2]))
+  return null
+}
+function dateKey(s) { const d = parseShipDate(s); return d ? `${d.getMonth()+1}/${d.getDate()}` : null }
 
-const INIT_SCH = [
-  {date:'5/9',item:'剝皮',barrels:4,inDate:'5/10'},{date:'5/10',item:'黃金',barrels:3,inDate:'5/11'},
-  {date:'5/11',item:'紅燒',barrels:1,inDate:'5/11'},{date:'5/12',item:'泡菜',barrels:4,inDate:'5/13'},
-  {date:'5/13',item:'酸白',barrels:4,inDate:'5/14'},{date:'5/14',item:'素花',barrels:4,inDate:'5/15'},
-  {date:'5/19',item:'黃金',barrels:4,inDate:'5/20'},{date:'5/22',item:'新鮮',barrels:4,inDate:'5/23'},
-]
+function esc(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c])) }
 const INIT_RULES = [
   '素花3天內做完，越貴不貴。','根菜系列盡量一起做，確保500kg以上。',
   '備料不可超過3天（原油除外）。','叫菜單低於30件先提採購討論。',
@@ -46,6 +60,28 @@ const INIT_VEG = [
   {name:'花椰菜',price:'',thresh:50},{name:'玉米',price:'',thresh:40},{name:'大白菜',price:'',thresh:25},
 ]
 
+function makeStartDate(s) {
+  if (!s) return new Date()
+  const [m, d] = s.split('/').map(Number)
+  if (!m || !d) return new Date()
+  return resolveDate(m, d)
+}
+
+function makeDates(startStr, count = 45) {
+  const B0 = makeStartDate(startStr)
+  const dates = []
+  for (let i = 0; i < count; i++) {
+    const d = new Date(B0.getFullYear(), B0.getMonth(), B0.getDate() + i)
+    const m = d.getMonth()+1, dy = d.getDate(), w = d.getDay()
+    dates.push({ k: `${m}/${dy}`, lb: `${m}/${dy} 週${WD[w]}`, mo: m, we: w===0||w===6, dt: d })
+  }
+  return dates
+}
+
+function nm(s) { if (!s) return null; const p = s.replace(/\s/g,'').split('/'); if (p.length!==2) return null; return `${parseInt(p[0])}/${parseInt(p[1])}` }
+function gc(v,mn) { if(v<=0)return'c-gray'; const r=v/mn; if(r<0.3)return'c-red'; if(r<1)return'c-warn'; if(r<1.5)return'c-low'; if(r<2.5)return'c-ok'; return'c-full' }
+function gb(v,mn) { return Math.min(100, Math.round(v/mn*50)) }
+
 export default function SchedulePage() {
   const [schData, setSchData] = useState(INIT_SCH)
   const [rules, setRules] = useState(INIT_RULES)
@@ -54,9 +90,104 @@ export default function SchedulePage() {
   const [extraRules, setExtraRules] = useState('')
   const [aiText, setAiText] = useState('')
   const [aiLoading, setAiLoading] = useState(false)
+  const [bi, setBi] = useState(DEFAULT_BI)
+  const [biEdit, setBiEdit] = useState(false)
+  const [startDate, setStartDate] = useState(todayKey())
+  const [startDateEdit, setStartDateEdit] = useState(false)
+  const [startDateInput, setStartDateInput] = useState(todayKey())
+  const [toast, setToast] = useState(null)
+  const [saving, setSaving] = useState(false)
+  const [orders, setOrders] = useState([])
+  const [flavorBasis, setFlavorBasis] = useState({})
+  const [loaded, setLoaded] = useState(false)
+  const [loadError, setLoadError] = useState('')
 
-  // 模擬客訂扣除
-  const orderDeductions = { '黃金': 480, '泡菜': 240, '素花': 460 }
+  const showToast = msg => { setToast(msg); setTimeout(() => setToast(null), 3000) }
+
+  // 從 Supabase 讀取排程設定
+  useEffect(() => {
+    const load = async () => {
+      const { data, error } = await supabase.from('adv_schedule_config').select('*').eq('id', 'default').maybeSingle()
+      if (error) { setLoadError(error.message); return }
+      if (data) {
+        if (data.sch_data) setSchData(withIds(data.sch_data))
+        if (data.rules) setRules(data.rules)
+        if (data.veg_data) setVegData(data.veg_data)
+        if (data.extra_rules) setExtraRules(data.extra_rules)
+        if (data.bi) setBi({ ...DEFAULT_BI, ...data.bi })
+        if (data.start_date) { setStartDate(data.start_date); setStartDateInput(data.start_date) }
+      }
+      setLoaded(true)
+    }
+    load()
+  }, [])
+
+  // 從 adv_orders 讀取未出貨客訂（計算庫存扣除），並讀取客訂管理的口味換算基準
+  useEffect(() => {
+    const fetchOrders = async () => {
+      const { data } = await supabase.from('adv_orders').select('*').in('status', ['pending','packaging','scheduled','prepared'])
+      if (data) setOrders(data)
+    }
+    const fetchBasis = async () => {
+      const { data } = await supabase.from('adv_flavor_config').select('configs').eq('id', 'default').maybeSingle()
+      if (data?.configs) setFlavorBasis(data.configs)
+    }
+    fetchOrders(); fetchBasis()
+    const ch = supabase.channel('sch_orders').on('postgres_changes', { event: '*', schema: 'public', table: 'adv_orders' }, () => fetchOrders()).subscribe()
+    return () => supabase.removeChannel(ch)
+  }, [])
+
+  // 儲存到 Supabase
+  const save = async () => {
+    if (!loaded) { alert(loadError ? '排程資料讀取失敗，無法存檔：' + loadError : '排程資料載入中，請稍候再存檔'); return }
+    setSaving(true)
+    const { error } = await supabase.from('adv_schedule_config').upsert({
+      id: 'default',
+      sch_data: schData,
+      rules,
+      veg_data: vegData,
+      extra_rules: extraRules,
+      bi,
+      start_date: startDate,
+      updated_at: new Date().toISOString()
+    })
+    setSaving(false)
+    if (error) { alert('儲存失敗：' + error.message) }
+    else { showToast('排程已儲存 ✅') }
+  }
+
+  const DATES = useMemo(() => makeDates(startDate), [startDate])
+
+  // 客訂換算成「包」並放到出貨日當天扣除
+  // 換算與客訂管理的「正常量」相同：袋數 × 每袋顆數 ÷ 每包顆數（香羹以 kg 計）
+  // 沒填出貨日或出貨日已過 → 算在第一天；超出 45 天預估範圍 → 不扣
+  const orderInfo = useMemo(() => {
+    const first = DATES[0].dt, last = DATES[DATES.length - 1].dt
+    const byDate = {}, custByDate = {}, total = {}
+    orders.forEach(o => {
+      const name = o.item_name || o.itemName || ''
+      const f = FL.find(x => name.includes(x))
+      const qty = Number(o.quantity) || 0
+      const ppu = Number(o.pieces_per_unit ?? o.piecesPerUnit) || 0
+      const basis = Number(flavorBasis[name]) || (name.includes('香羹') ? 1 : 40)
+      const packs = Math.round(qty * ppu / basis)
+      const td = parseShipDate(o.target_date || o.targetDate)
+      let k
+      if (!td || td < first) k = DATES[0].k
+      else if (td > last) return
+      else k = `${td.getMonth()+1}/${td.getDate()}`
+      if (f && packs > 0) {
+        if (!byDate[k]) byDate[k] = {}
+        byDate[k][f] = (byDate[k][f] || 0) + packs
+        total[f] = (total[f] || 0) + packs
+      }
+      const cust = o.customer_name || o.customerName || '未知客戶'
+      if (!custByDate[k]) custByDate[k] = []
+      custByDate[k].push(`${cust} ${f || name} ${qty}${o.unit || '袋'}`)
+    })
+    return { byDate, custByDate, total }
+  }, [orders, flavorBasis, DATES])
+  const orderDeductions = orderInfo.total
 
   const cInv = useCallback(() => {
     const im = {}, pm = {}
@@ -69,24 +200,35 @@ export default function SchedulePage() {
     })
     const res = {}
     FL.forEach(f => {
-      const b = BI[f]; if (!b) return
-      const deduct = orderDeductions[f] || 0
-      let run = Math.max(0, b.c - deduct)
+      const b = bi[f]; if (!b) return
+      let run = b.c
       res[f] = DATES.map(d => {
         run -= b.d
+        run -= orderInfo.byDate[d.k]?.[f] || 0
         if (im[d.k]?.[f]) run += im[d.k][f]
         run = Math.max(0, run)
         return { v: Math.round(run), p: !!(pm[d.k]?.has(f)) }
       })
     })
     return res
-  }, [schData])
+  }, [schData, bi, orderInfo, DATES])
 
   const invTable = useMemo(() => cInv(), [cInv])
   const tot = schData.reduce((s, r) => s + (PPB[r.item]||0) * (r.barrels||0), 0)
-  const updateSch = (i, k, v) => { const n = [...schData]; n[i] = { ...n[i], [k]: v }; setSchData(n) }
+
+  const updateSch = (i, k, v) => {
+    setSchData(prev => {
+      const n = [...prev]; n[i] = { ...n[i], [k]: v }; return n
+    })
+  }
 
   const deductSummary = Object.entries(orderDeductions).filter(([,v]) => v > 0)
+
+  // 當日客訂出貨（用於庫存表旁邊顯示）
+  const todayShip = useMemo(() => {
+    const tk = todayKey()
+    return orders.filter(o => dateKey(o.target_date || o.targetDate) === tk)
+  }, [orders])
 
   const runAI = () => {
     setAiLoading(true); setAiText('')
@@ -96,7 +238,7 @@ export default function SchedulePage() {
       const priceWarn = new Set()
       highVeg.forEach(v => { Object.entries(ITEM_VEG).forEach(([item, veg]) => { if (veg === v.name) priceWarn.add(item) }) })
       const az = f => {
-        const b = BI[f]; if (!b || !data[f]) return { has: false }
+        const b = bi[f]; if (!b || !data[f]) return { has: false }
         let fw = -1, fr = -1
         data[f].forEach(({ v }, di) => { const c = gc(v,b.mn); if(c==='c-warn'&&fw<0)fw=di; if((c==='c-red'||c==='c-gray')&&fr<0)fr=di })
         const di = fr>=0?fr:fw; const urg = fr>=0; const pbt = PPB[f]||240
@@ -112,14 +254,25 @@ export default function SchedulePage() {
       if (extraRules) { txt += `【補充規則】\n${extraRules}\n\n` }
       txt += '【主產品建議（水餃・餡餅・湯包）】\n'
       if (mi.length === 0) { txt += '✓ 45天內主產品庫存充足\n' }
-      else { mi.forEach(({ f, di, urg, need, pbt, pd }) => { const wd = DATES[di]?.lb||'—', sd = DATES[pd]?.lb||'—'; txt += `• ${urg?'[緊急]':'[偏低]'} ${f}：建議 ${sd} 前排 ${need} 桶（+${(need*pbt).toLocaleString()}包）\n  ${wd} 起庫存${urg?'緊急不足':'偏低'}。現 ${BI[f].c.toLocaleString()} 包，日耗 ${BI[f].d} 包，最低 ${BI[f].mn.toLocaleString()} 包。${priceWarn.has(f)?'⚠ 菜價偏高，請確認成本。':''}\n` }) }
+      else { mi.forEach(({ f, di, urg, need, pbt, pd }) => { const wd = DATES[di]?.lb||'—', sd = DATES[pd]?.lb||'—'; txt += `• ${urg?'[緊急]':'[偏低]'} ${f}：建議 ${sd} 前排 ${need} 桶（+${(need*pbt).toLocaleString()}包）\n  ${wd} 起庫存${urg?'緊急不足':'偏低'}。現 ${bi[f].c.toLocaleString()} 包，日耗 ${bi[f].d} 包，最低 ${bi[f].mn.toLocaleString()} 包。${priceWarn.has(f)?'⚠ 菜價偏高，請確認成本。':''}\n` }) }
       txt += '\n【副產品建議（搭配主產品同日排入）】\n'
       if (si.length === 0) { txt += '✓ 副產品庫存充足\n' }
-      else { si.forEach(({ f, di, urg, need, pbt, pd }) => { const wd = DATES[di]?.lb||'—', sd = DATES[pd]?.lb||'—'; txt += `• ${urg?'[緊急]':'[偏低]'} ${f}（副）：建議 ${sd} 前搭配 ${SP[f]||'主產品'}，排 ${need} 桶。\n  ${wd} 起庫存${urg?'不足':'偏低'}，現 ${BI[f].c.toLocaleString()} 包。\n` }) }
+      else { si.forEach(({ f, di, urg, need, pbt, pd }) => { const wd = DATES[di]?.lb||'—', sd = DATES[pd]?.lb||'—'; txt += `• ${urg?'[緊急]':'[偏低]'} ${f}（副）：建議 ${sd} 前搭配 ${SP[f]||'主產品'}，排 ${need} 桶。\n  ${wd} 起庫存${urg?'不足':'偏低'}，現 ${bi[f].c.toLocaleString()} 包。\n` }) }
       if (sok.length > 0) txt += `✓ 充足副產品：${sok.join('、')} 可彈性安排。\n`
       txt += '\n【原料群組建議】\n• 紅燒＋剝皮：共用根菜類原料，建議同批次節省換料\n• 素花系列：間隔不超過3天，越貴不貴\n• 副產品原則：主產品桶數少（1-2桶）時同日排入，不佔整天'
       setAiText(txt); setAiLoading(false)
     }, 1400)
+  }
+
+  // 產生 Google 日曆匯出連結
+  const makeGoogleCalLink = (r) => {
+    const [m, d] = (r.date || '').split('/').map(Number)
+    if (!m || !d) return null
+    const s = resolveDate(m, d), e = new Date(s.getFullYear(), s.getMonth(), s.getDate() + 1)
+    const pad = n => String(n).padStart(2,'0')
+    const fmt = x => `${x.getFullYear()}${pad(x.getMonth()+1)}${pad(x.getDate())}`
+    const title = encodeURIComponent(`生產排程：${r.item} ${r.barrels}桶（入庫${r.inDate||'同日'}）`)
+    return `https://calendar.google.com/calendar/r/eventedit?text=${title}&dates=${fmt(s)}/${fmt(e)}&details=${encodeURIComponent(`品項：${r.item}\n桶數：${r.barrels}\n包數：${(PPB[r.item]||0)*r.barrels}包\n入庫日：${r.inDate||'同日'}`)}`
   }
 
   // 庫存預估表 HTML
@@ -133,6 +286,7 @@ export default function SchedulePage() {
       const deduct = orderDeductions[f] || 0
       h += `<th class="${hasSch ? 'hs' : ''}" style="${fsub ? 'border-left:3px solid #94a3b8!important' : ''}">${f}${deduct > 0 ? `<br><span style="font-size:8px;color:#ef4444;background:#fef2f2;border-radius:2px;padding:0 2px">-${deduct}</span>` : ''}${isSub ? '<br><span style="font-size:8px;background:#ede9fe;color:#5b21b6;border-radius:2px;padding:0 2px">副</span>' : ''}${hasSch ? `<br><span style="font-size:8px;background:${isSub ? '#5b21b6' : '#1e293b'};color:#fff;border-radius:2px;padding:0 3px">排</span>` : ''}</th>`
     })
+    h += `<th style="text-align:left;min-width:150px;border-left:3px solid #94a3b8!important">客訂出貨</th>`
     h += '</tr></thead><tbody>'
     let lastM = -1
     DATES.forEach((d, di) => {
@@ -143,111 +297,258 @@ export default function SchedulePage() {
       FL.forEach((f, fi) => {
         if (!invTable[f]) { h += `<td class="ic"></td>`; return }
         const { v, p } = invTable[f][di]
-        const b = BI[f] || { mn: 1 }
+        const b = bi[f] || { mn: 1 }
         const cls = gc(v, b.mn); const pct = gb(v, b.mn)
         const fsub = fi === MAIN.length
         h += `<td class="ic ${cls}${p ? ' hp' : ''}" style="${fsub ? 'border-left:3px solid #94a3b8!important' : ''}"><div class="ci"><div class="cn">${v.toLocaleString()}</div><div class="bw"><div class="bf" style="width:${pct}%"></div></div></div></td>`
       })
+      const cs = orderInfo.custByDate[d.k] || []
+      h += `<td style="text-align:left;font-size:11px;color:#065f46;white-space:nowrap;padding:2px 6px;border-left:3px solid #94a3b8!important">${cs.map(esc).join('<br>')}</td>`
       h += '</tr>'
     })
     h += '</tbody>'
     return h
-  }, [invTable, schData])
+  }, [invTable, schData, bi, orderDeductions, orderInfo, DATES])
 
   return (
     <div>
-      {/* 客訂扣除提示 */}
-      {deductSummary.length > 0 && (
-        <div style={{ background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 10, padding: '8px 12px', marginBottom: 10, fontSize: 15, color: '#7f1d1d' }}>
-          <strong>客訂庫存扣除：</strong> {deductSummary.map(([f, v]) => `${f} -${v}包`).join(' · ')}（未出貨客訂已從預估庫存扣除）
+      {/* Toast */}
+      {toast && (
+        <div style={{ position: 'fixed', top: 80, left: 0, right: 0, zIndex: 100, display: 'flex', justifyContent: 'center', pointerEvents: 'none' }}>
+          <div style={{ background: '#059669', color: '#fff', padding: '10px 24px', borderRadius: 50, fontWeight: 700, fontSize: 14 }}>{toast}</div>
         </div>
       )}
 
-      {/* 庫存預估（上） */}
+      {loadError && (
+        <div style={{ background: '#fff7ed', border: '1px solid #fed7aa', borderRadius: 10, padding: '8px 12px', marginBottom: 10, fontSize: 14, color: '#7c2d12' }}>
+          <strong>排程資料讀取失敗，暫時不能存檔：</strong>{loadError}（第一次使用請先在 Supabase 建立 adv_schedule_config 資料表）
+        </div>
+      )}
+
+      {/* 客訂扣除提示 */}
+      {deductSummary.length > 0 && (
+        <div style={{ background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 10, padding: '8px 12px', marginBottom: 10, fontSize: 14, color: '#7f1d1d' }}>
+          <strong>客訂庫存扣除：</strong> {deductSummary.map(([f, v]) => `${f} -${v}包`).join(' · ')}（單位：包，未出貨客訂已依出貨日從預估庫存扣除）
+        </div>
+      )}
+
+      {/* 今日出貨客訂 */}
+      {todayShip.length > 0 && (
+        <div style={{ background: '#f0fdf4', border: '1px solid #a7f3d0', borderRadius: 10, padding: '8px 12px', marginBottom: 10, fontSize: 14, color: '#065f46' }}>
+          <strong>📦 今日出貨：</strong> {todayShip.map(o => `${o.customer_name||o.customerName} ${o.item_name||o.itemName} ×${o.quantity}袋`).join(' · ')}
+        </div>
+      )}
+
+      {/* 庫存預估 */}
       <div className="card">
         <div className="card-title">
-          庫存預估（自動更新）
-          <div style={{ display: 'flex', gap: 3, flexWrap: 'wrap' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+            庫存預估（自動更新）
+            {/* 起始日期 */}
+            {startDateEdit ? (
+              <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+                <span style={{ fontSize: 12, color: '#94a3b8' }}>起算：</span>
+                <input
+                  className="inp"
+                  value={startDateInput}
+                  style={{ width: 56, fontSize: 13 }}
+                  placeholder="5/8"
+                  onChange={e => setStartDateInput(e.target.value)}
+                  onBlur={() => {
+                    const v = startDateInput.trim()
+                    if (/^\d+\/\d+$/.test(v)) { setStartDate(v); setStartDateEdit(false) }
+                  }}
+                  onKeyDown={e => {
+                    if (e.key === 'Enter') {
+                      const v = startDateInput.trim()
+                      if (/^\d+\/\d+$/.test(v)) { setStartDate(v); setStartDateEdit(false) }
+                    }
+                  }}
+                  autoFocus
+                />
+              </div>
+            ) : (
+              <span
+                style={{ fontSize: 12, color: '#94a3b8', cursor: 'pointer', textDecoration: 'underline dotted', padding: '2px 4px' }}
+                onClick={() => setStartDateEdit(true)}
+                title="點擊修改起始日期"
+              >
+                起算 {startDate}
+              </span>
+            )}
+          </div>
+          <div style={{ display: 'flex', gap: 3, flexWrap: 'wrap', alignItems: 'center' }}>
             {[['#f0fdf4','#166534','充足'],['#fefce8','#713f12','偏低'],['#fff7ed','#7c2d12','紅燈'],['#fef2f2','#7f1d1d','緊急'],['#f8fafc','#475569','灰燈']].map(([bg,tc,l]) => (
-              <span key={l} className="bdg" style={{ background: bg, color: tc, fontSize: 15 }}>{l}</span>
+              <span key={l} className="bdg" style={{ background: bg, color: tc, fontSize: 12 }}>{l}</span>
             ))}
+            <button
+              onClick={() => setBiEdit(!biEdit)}
+              style={{ fontSize: 12, background: biEdit ? '#1e293b' : '#f1f5f9', color: biEdit ? '#fff' : '#64748b', border: 'none', borderRadius: 6, padding: '3px 8px', cursor: 'pointer' }}
+            >
+              {biEdit ? '完成' : '⚙ 庫存設定'}
+            </button>
           </div>
         </div>
+
+        {/* 庫存上限編輯 */}
+        {biEdit && (
+          <div style={{ marginBottom: 12, padding: 12, background: '#f8fafc', borderRadius: 10, border: '1px solid #e2e8f0' }}>
+            <div style={{ fontSize: 13, fontWeight: 700, color: '#475569', marginBottom: 8 }}>庫存設定（現有庫存 / 最低庫存 / 最高庫存 / 日耗量）</div>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(300px, 1fr))', gap: 6 }}>
+              {FL.map(f => (
+                <div key={f} style={{ display: 'flex', alignItems: 'center', gap: 4, background: '#fff', padding: '6px 8px', borderRadius: 8, border: '1px solid #f1f5f9' }}>
+                  <span style={{ fontSize: 13, fontWeight: 700, color: '#1e293b', minWidth: 30 }}>{f}</span>
+                  <span style={{ fontSize: 11, color: '#94a3b8' }}>現：</span>
+                  <input type="number" className="inp" value={bi[f]?.c||0} style={{ width: 58, fontSize: 12, padding: '3px 5px' }}
+                    onChange={e => setBi(b => ({ ...b, [f]: { ...b[f], c: Number(e.target.value) } }))} />
+                  <span style={{ fontSize: 11, color: '#94a3b8' }}>低：</span>
+                  <input type="number" className="inp" value={bi[f]?.mn||0} style={{ width: 52, fontSize: 12, padding: '3px 5px' }}
+                    onChange={e => setBi(b => ({ ...b, [f]: { ...b[f], mn: Number(e.target.value) } }))} />
+                  <span style={{ fontSize: 11, color: '#94a3b8' }}>耗：</span>
+                  <input type="number" className="inp" value={bi[f]?.d||0} style={{ width: 40, fontSize: 12, padding: '3px 5px' }}
+                    onChange={e => setBi(b => ({ ...b, [f]: { ...b[f], d: Number(e.target.value) } }))} />
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
         <div style={{ overflowX: 'auto', maxHeight: 380, overflowY: 'auto' }}>
           <table className="it" dangerouslySetInnerHTML={{ __html: invHTML }}></table>
         </div>
-        <div style={{ fontSize: 15, color: '#94a3b8', marginTop: 5 }}>粗框=當日入庫 · 條=庫存/最低庫存 · 雙線=月份 · ║=主∣副 · 紅字=客訂扣除</div>
+        <div style={{ fontSize: 12, color: '#94a3b8', marginTop: 5 }}>粗框=當日入庫 · 條=庫存/最低庫存 · 雙線=月份 · ║=主∣副 · 紅字=客訂扣除包數 · 最右欄=當日出貨客戶</div>
       </div>
 
-      {/* 排程輸入（中） */}
+      {/* 排程輸入 */}
       <div className="card">
         <div className="card-title">
           排程輸入
-          <span style={{ fontSize: 14, color: '#64748b', fontWeight: 400 }}>合計 <strong style={{ color: '#1e293b' }}>{tot > 0 ? `${tot.toLocaleString()}包` : '—'}</strong></span>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span style={{ fontSize: 13, color: '#64748b', fontWeight: 400 }}>合計 <strong style={{ color: '#1e293b' }}>{tot > 0 ? `${tot.toLocaleString()}包` : '—'}</strong></span>
+            <button
+              onClick={save}
+              disabled={saving}
+              style={{ fontSize: 13, background: saving ? '#94a3b8' : '#059669', color: '#fff', border: 'none', borderRadius: 8, padding: '5px 12px', cursor: saving ? 'default' : 'pointer', fontWeight: 700 }}
+            >
+              {saving ? '儲存中...' : '💾 存檔'}
+            </button>
+          </div>
         </div>
         <div style={{ overflowX: 'auto' }}>
-          <table className="tbl" style={{ fontSize: 15 }}>
+          <table className="tbl" style={{ fontSize: 14 }}>
             <thead><tr>
               <th style={{ width: 54 }}>生產日</th>
               <th style={{ width: 82 }}>品項</th>
-              <th style={{ width: 78, textAlign: 'center' }}>桶數</th>
-              <th style={{ width: 48, textAlign: 'right' }}>包數</th>
+              <th style={{ width: 86, textAlign: 'center' }}>桶數</th>
+              <th style={{ width: 52, textAlign: 'right' }}>包數</th>
               <th style={{ width: 54 }}>入庫日</th>
+              <th style={{ width: 28 }}>日曆</th>
               <th style={{ width: 20 }}></th>
             </tr></thead>
             <tbody>
               {schData.map((r, i) => {
                 const pk = (PPB[r.item]||0) * (r.barrels||0)
                 const isSub = SUB.includes(r.item)
+                const gcLink = makeGoogleCalLink(r)
                 return (
-                  <tr key={i} style={{ background: isSub ? 'rgba(109,40,217,.04)' : 'transparent' }}>
-                    <td><input className="inp" value={r.date} style={{ width: 48, fontSize: 14 }} onChange={e => updateSch(i, 'date', e.target.value)} /></td>
+                  <tr key={r.id || i} style={{ background: isSub ? 'rgba(109,40,217,.04)' : 'transparent' }}>
+                    <td>
+                      <input
+                        className="inp"
+                        defaultValue={r.date}
+                        style={{ width: 48, fontSize: 13 }}
+                        onBlur={e => updateSch(i, 'date', e.target.value)}
+                      />
+                    </td>
                     <td>
                       <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
                         {isSub && <span style={{ fontSize: 8, background: '#ede9fe', color: '#5b21b6', borderRadius: 2, padding: '1px 3px', flexShrink: 0 }}>副</span>}
-                        <select className="inp" style={{ width: isSub ? 58 : 70, fontSize: 14 }} value={r.item} onChange={e => updateSch(i, 'item', e.target.value)}>
+                        <select
+                          className="inp"
+                          style={{ width: isSub ? 58 : 70, fontSize: 13 }}
+                          value={r.item}
+                          onChange={e => updateSch(i, 'item', e.target.value)}
+                        >
                           <optgroup label="主產品">{MAIN.map(f => <option key={f}>{f}</option>)}</optgroup>
                           <optgroup label="副產品">{SUB.map(f => <option key={f}>{f}</option>)}</optgroup>
                         </select>
                       </div>
                     </td>
                     <td>
-                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4 }}>
-                        <button onClick={() => updateSch(i, 'barrels', Math.max(1, r.barrels-1))} style={{ width: 20, height: 20, borderRadius: '50%', border: '1px solid #e2e8f0', background: '#fff', fontSize: 15, cursor: 'pointer', lineHeight: 1, flexShrink: 0 }}>−</button>
-                        <span style={{ fontSize: 14, fontWeight: 700, minWidth: 14, textAlign: 'center' }}>{r.barrels}</span>
-                        <button onClick={() => updateSch(i, 'barrels', r.barrels+1)} style={{ width: 20, height: 20, borderRadius: '50%', border: '1px solid #e2e8f0', background: '#fff', fontSize: 15, cursor: 'pointer', lineHeight: 1, flexShrink: 0 }}>＋</button>
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 3 }}>
+                        <button
+                          onClick={() => updateSch(i, 'barrels', Math.max(1, (r.barrels||1)-1))}
+                          style={{ width: 22, height: 22, borderRadius: '50%', border: '1px solid #e2e8f0', background: '#fff', fontSize: 14, cursor: 'pointer', lineHeight: 1, flexShrink: 0 }}
+                        >−</button>
+                        <span style={{ fontSize: 14, fontWeight: 700, minWidth: 18, textAlign: 'center' }}>{r.barrels}</span>
+                        <button
+                          onClick={() => updateSch(i, 'barrels', (r.barrels||1)+1)}
+                          style={{ width: 22, height: 22, borderRadius: '50%', border: '1px solid #e2e8f0', background: '#fff', fontSize: 14, cursor: 'pointer', lineHeight: 1, flexShrink: 0 }}
+                        >＋</button>
                       </div>
                     </td>
-                    <td style={{ textAlign: 'right', fontWeight: 700, fontSize: 15, paddingRight: 5 }}>{pk > 0 ? pk.toLocaleString() : '—'}</td>
-                    <td><input className="inp" value={r.inDate||''} style={{ width: 46, fontSize: 14 }} onChange={e => updateSch(i, 'inDate', e.target.value)} /></td>
-                    <td><button onClick={() => setSchData(d => d.filter((_,j) => j!==i))} style={{ color: '#94a3b8', background: 'none', border: 'none', cursor: 'pointer', fontSize: 14, padding: '0 2px' }}>×</button></td>
+                    <td style={{ textAlign: 'right', fontWeight: 700, fontSize: 14, paddingRight: 5 }}>{pk > 0 ? pk.toLocaleString() : '—'}</td>
+                    <td>
+                      <input
+                        className="inp"
+                        defaultValue={r.inDate||''}
+                        style={{ width: 46, fontSize: 13 }}
+                        onBlur={e => updateSch(i, 'inDate', e.target.value)}
+                      />
+                    </td>
+                    <td>
+                      {gcLink && (
+                        <a href={gcLink} target="_blank" rel="noreferrer" title="加入 Google 日曆"
+                          style={{ fontSize: 14, textDecoration: 'none', opacity: 0.6, display: 'block', textAlign: 'center' }}>
+                          📅
+                        </a>
+                      )}
+                    </td>
+                    <td>
+                      <button
+                        onClick={() => setSchData(d => d.filter((_,j) => j!==i))}
+                        style={{ color: '#94a3b8', background: 'none', border: 'none', cursor: 'pointer', fontSize: 14, padding: '0 2px' }}
+                      >×</button>
+                    </td>
                   </tr>
                 )
               })}
             </tbody>
           </table>
         </div>
-        <button onClick={() => setSchData(d => [...d, { date: '', item: '黃金', barrels: 4, inDate: '' }])} style={{ marginTop: 8, fontSize: 14, color: '#94a3b8', background: 'none', border: '1px dashed #e2e8f0', borderRadius: 7, padding: '5px 0', cursor: 'pointer', width: '100%' }}>+ 新增排程列</button>
+        <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+          <button
+            onClick={() => setSchData(d => [...d, { id: uid(), date: '', item: '黃金', barrels: 4, inDate: '' }])}
+            style={{ flex: 1, fontSize: 13, color: '#94a3b8', background: 'none', border: '1px dashed #e2e8f0', borderRadius: 7, padding: '5px 0', cursor: 'pointer' }}
+          >+ 新增排程列</button>
+          <button
+            onClick={save}
+            disabled={saving}
+            style={{ fontSize: 13, background: saving ? '#94a3b8' : '#1e293b', color: '#fff', border: 'none', borderRadius: 7, padding: '5px 18px', cursor: saving ? 'default' : 'pointer', fontWeight: 700 }}
+          >
+            {saving ? '儲存中...' : '💾 存檔'}
+          </button>
+        </div>
       </div>
 
-      {/* AI 建議（下） */}
+      {/* AI 建議 */}
       <div className="card">
         <div className="card-title">AI 排程建議<button className="btn btn-dark btn-sm" onClick={runAI}>重新分析</button></div>
 
         <details style={{ marginBottom: 10 }}>
-          <summary>原料菜價管理（各蔬菜可自設飆漲標準）</summary>
+          <summary style={{ fontSize: 14, cursor: 'pointer', userSelect: 'none' }}>原料菜價管理（各蔬菜可自設飆漲標準）</summary>
           <div style={{ marginTop: 8, padding: 10, background: '#f8fafc', borderRadius: 8, border: '1px solid #f1f5f9' }}>
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 78px 78px 50px 28px', gap: 5, marginBottom: 5, paddingBottom: 4, borderBottom: '1px solid #e2e8f0' }}>
-              {['蔬菜','本週價(元/kg)','飆漲標準','狀態',''].map(h => <span key={h} style={{ fontSize: 15, fontWeight: 700, color: '#64748b' }}>{h}</span>)}
+              {['蔬菜','本週價(元/kg)','飆漲標準','狀態',''].map(h => <span key={h} style={{ fontSize: 13, fontWeight: 700, color: '#64748b' }}>{h}</span>)}
             </div>
             {vegData.map((v, i) => {
               const p = parseFloat(v.price)||0; const high = p>0 && p>v.thresh
               return (
                 <div key={i} className="veg-row">
-                  <input className="inp" value={v.name} style={{ fontSize: 14 }} onChange={e => { const n=[...vegData]; n[i]={...n[i],name:e.target.value}; setVegData(n) }} />
-                  <input type="number" className="inp" value={v.price} placeholder="價格" style={{ fontSize: 14, borderColor: high ? '#f87171' : '', background: high ? '#fef2f2' : '' }} onChange={e => { const n=[...vegData]; n[i]={...n[i],price:e.target.value}; setVegData(n) }} />
-                  <input type="number" className="inp" value={v.thresh} style={{ fontSize: 14 }} onChange={e => { const n=[...vegData]; n[i]={...n[i],thresh:+e.target.value}; setVegData(n) }} />
-                  <span className="bdg" style={{ fontSize: 15, background: p>0?(high?'#fef2f2':'#f0fdf4'):'#f8fafc', color: p>0?(high?'#7f1d1d':'#166534'):'#94a3b8' }}>{p>0?(high?'飆漲':'正常'):'—'}</span>
+                  <input className="inp" value={v.name} style={{ fontSize: 13 }} onChange={e => { const n=[...vegData]; n[i]={...n[i],name:e.target.value}; setVegData(n) }} />
+                  <input type="number" className="inp" value={v.price} placeholder="價格" style={{ fontSize: 13, borderColor: high ? '#f87171' : '', background: high ? '#fef2f2' : '' }} onChange={e => { const n=[...vegData]; n[i]={...n[i],price:e.target.value}; setVegData(n) }} />
+                  <input type="number" className="inp" value={v.thresh} style={{ fontSize: 13 }} onChange={e => { const n=[...vegData]; n[i]={...n[i],thresh:+e.target.value}; setVegData(n) }} />
+                  <span className="bdg" style={{ fontSize: 13, background: p>0?(high?'#fef2f2':'#f0fdf4'):'#f8fafc', color: p>0?(high?'#7f1d1d':'#166534'):'#94a3b8' }}>{p>0?(high?'飆漲':'正常'):'—'}</span>
                   <button className="btn btn-sm btn-red" onClick={() => setVegData(d => d.filter((_,j) => j!==i))}>刪</button>
                 </div>
               )
@@ -257,16 +558,16 @@ export default function SchedulePage() {
         </details>
 
         <details style={{ marginBottom: 10 }}>
-          <summary>補充規則 ／ 排程規則管理</summary>
+          <summary style={{ fontSize: 14, cursor: 'pointer', userSelect: 'none' }}>補充規則 ／ 排程規則管理</summary>
           <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 7 }}>
             <textarea className="inp" value={extraRules} onChange={e => setExtraRules(e.target.value)} placeholder={`補充本週特殊狀況，例如：\n· 青江菜飆漲，綠蔬先暫緩\n· 下週大客單，多備黃金泡菜`} />
-            <div style={{ fontSize: 14, fontWeight: 700, color: '#64748b' }}>排程規則（可編輯）</div>
+            <div style={{ fontSize: 13, fontWeight: 700, color: '#64748b' }}>排程規則（可編輯）</div>
             {rules.map((r, i) => (
               <div key={i} style={{ display: 'flex', gap: 6, alignItems: 'center', padding: '3px 0', borderBottom: '1px solid #f8fafc' }}>
-                <span style={{ fontSize: 15, color: '#94a3b8', minWidth: 16 }}>{i+1}.</span>
+                <span style={{ fontSize: 13, color: '#94a3b8', minWidth: 16 }}>{i+1}.</span>
                 {ruleEdit
-                  ? <><input className="inp" value={r} style={{ flex: 1, fontSize: 14 }} onChange={e => { const n=[...rules]; n[i]=e.target.value; setRules(n) }} /><button className="btn btn-sm btn-red" onClick={() => setRules(r2 => r2.filter((_,j) => j!==i))}>刪</button></>
-                  : <span style={{ flex: 1, fontSize: 15 }}>{r}</span>
+                  ? <><input className="inp" value={r} style={{ flex: 1, fontSize: 13 }} onChange={e => { const n=[...rules]; n[i]=e.target.value; setRules(n) }} /><button className="btn btn-sm btn-red" onClick={() => setRules(r2 => r2.filter((_,j) => j!==i))}>刪</button></>
+                  : <span style={{ flex: 1, fontSize: 13 }}>{r}</span>
                 }
               </div>
             ))}
@@ -277,9 +578,9 @@ export default function SchedulePage() {
           </div>
         </details>
 
-        {aiLoading && <div style={{ fontSize: 15, color: '#94a3b8', padding: '6px 0' }}>分析中...</div>}
-        {aiText && <pre style={{ fontSize: 15, lineHeight: 1.8, whiteSpace: 'pre-wrap', fontFamily: 'Noto Sans TC,sans-serif', color: '#1e293b', background: '#f8fafc', padding: '10px 12px', borderRadius: 8, marginTop: 4 }}>{aiText}</pre>}
-        {!aiLoading && !aiText && <div style={{ fontSize: 15, color: '#94a3b8', padding: '6px 0' }}>點「重新分析」產生 AI 建議排程</div>}
+        {aiLoading && <div style={{ fontSize: 14, color: '#94a3b8', padding: '6px 0' }}>分析中...</div>}
+        {aiText && <pre style={{ fontSize: 14, lineHeight: 1.8, whiteSpace: 'pre-wrap', fontFamily: 'Noto Sans TC,sans-serif', color: '#1e293b', background: '#f8fafc', padding: '10px 12px', borderRadius: 8, marginTop: 4 }}>{aiText}</pre>}
+        {!aiLoading && !aiText && <div style={{ fontSize: 14, color: '#94a3b8', padding: '6px 0' }}>點「重新分析」產生 AI 建議排程</div>}
       </div>
     </div>
   )

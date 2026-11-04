@@ -1,6 +1,19 @@
 import { useState, useEffect, useMemo, useRef } from 'react'
 import { supabase } from '../lib/supabase'
 
+// 訂單流程（資料庫狀態值不變，只改顯示名稱）：
+// 等待排程(生產排程科) → 包材準備(原物料倉庫管理科) → 完成備貨(包裝科) → 確認出貨(出貨交運科) → 完成出貨
+const STATES = ['pending', 'packaging', 'scheduled', 'prepared', 'shipped']
+const STAGE = {
+  pending:   { tab: '等待排程', dept: '生產排程科',       action: '排入行程', dateLabel: '排程生產日' },
+  packaging: { tab: '包材準備', dept: '原物料倉庫管理科', action: '包材備妥', note: '確認外箱、麥頭等包材已備妥，交給包裝科備貨。' },
+  scheduled: { tab: '完成備貨', dept: '包裝科',           action: '完成備貨', dateLabel: '完成備貨日期' },
+  prepared:  { tab: '確認出貨', dept: '出貨交運科',       action: '確認出貨', dateLabel: '確認出貨日期' },
+  shipped:   { tab: '完成出貨', dept: '' },
+}
+const STATUS_LABEL = Object.fromEntries(STATES.map(s => [s, STAGE[s].tab]))
+const NEXT_ACTION = Object.fromEntries(STATES.filter(s => STAGE[s].action).map(s => [s, STAGE[s].action]))
+
 export default function OrdersPage({ user }) {
   const [orders, setOrders] = useState([])
   const [loading, setLoading] = useState(true)
@@ -126,13 +139,13 @@ export default function OrdersPage({ user }) {
   }
 
   const changeStatus = async (order, direction) => {
-    const states = ['pending', 'scheduled', 'prepared', 'shipped']
-    const idx = states.indexOf(order.status)
-    const next = Math.max(0, Math.min(states.length - 1, idx + direction))
+    const idx = STATES.indexOf(order.status)
+    const next = Math.max(0, Math.min(STATES.length - 1, idx + direction))
     if (next === idx) return
-    await supabase.from('adv_orders').update({ status: states[next], updated_at: new Date().toISOString() }).eq('id', order.id)
+    const { error } = await supabase.from('adv_orders').update({ status: STATES[next], updated_at: new Date().toISOString() }).eq('id', order.id)
+    if (error) { alert('狀態更新失敗：' + error.message); return }
     fetchOrders()
-    showToast(`已退回：${['待安排', '已排程', '已備貨', '已出貨'][next]} ✅`)
+    showToast(`已退回：${STATUS_LABEL[STATES[next]]} ✅`)
   }
 
   const closeForm = () => {
@@ -217,6 +230,7 @@ export default function OrdersPage({ user }) {
 
   const THEME = {
     pending:   { bg: '#fffbeb', header: '#f59e0b', accent: '#92400e', border: '#fde68a' },
+    packaging: { bg: '#f5f3ff', header: '#8b5cf6', accent: '#5b21b6', border: '#ddd6fe' },
     scheduled: { bg: '#f0fdf4', header: '#10b981', accent: '#065f46', border: '#a7f3d0' },
     prepared:  { bg: '#eff6ff', header: '#3b82f6', accent: '#1e3a8a', border: '#bfdbfe' },
     shipped:   { bg: '#f8fafc', header: '#64748b', accent: '#1e293b', border: '#e2e8f0' },
@@ -243,9 +257,12 @@ export default function OrdersPage({ user }) {
       </div>
 
       <div style={{ maxWidth: 600, margin: '0 auto', padding: '12px 16px' }}>
-        <div style={{ display: 'flex', background: 'rgba(255,255,255,.5)', borderRadius: 16, padding: 4, marginBottom: 12, gap: 2, overflowX: 'auto' }}>
-          {[['pending', '待安排'], ['scheduled', '已排程'], ['prepared', '已備貨'], ['shipped', '已出貨'], ['stats', '日曆統計']].map(([t, l]) => (
-            <button key={t} onClick={() => setActiveTab(t)} style={{ flex: 1, minWidth: 60, padding: '8px 4px', borderRadius: 12, border: 'none', fontSize: 14, fontWeight: 700, cursor: 'pointer', background: activeTab === t ? th.header : 'transparent', color: activeTab === t ? '#fff' : '#94a3b8' }}>{l}</button>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', background: 'rgba(255,255,255,.5)', borderRadius: 16, padding: 4, marginBottom: 12, gap: 4 }}>
+          {[...STATES.map(s => [s, STAGE[s].tab, STAGE[s].dept]), ['stats', '日曆統計', '']].map(([t, l, dept]) => (
+            <button key={t} onClick={() => setActiveTab(t)} style={{ padding: '8px 4px', borderRadius: 12, border: 'none', fontSize: 14, fontWeight: 700, lineHeight: 1.35, cursor: 'pointer', fontFamily: 'inherit', background: activeTab === t ? th.header : 'transparent', color: activeTab === t ? '#fff' : '#94a3b8' }}>
+              <div>{l}</div>
+              {dept && <div style={{ fontSize: 11, fontWeight: 500, opacity: 0.85 }}>({dept})</div>}
+            </button>
           ))}
         </div>
 
@@ -314,6 +331,8 @@ export default function OrdersPage({ user }) {
                       </div>
                       <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 8 }}>
                         {(o.box_type||o.boxType) && <span style={{ fontSize: 12, background: '#eff6ff', color: '#1d4ed8', padding: '2px 8px', borderRadius: 6, fontWeight: 700 }}>{o.box_type||o.boxType}</span>}
+                        {!hasMultipleSub && (o.shipping_mark||o.shippingMark) && <span style={{ fontSize: 12, background: '#fef2f2', color: '#ef4444', padding: '2px 8px', borderRadius: 6, fontWeight: 700 }}>🏷️ 一般麥頭</span>}
+                        {!hasMultipleSub && o.color_mark && <span style={{ fontSize: 12, background: '#fdf4ff', color: '#7e22ce', padding: '2px 8px', borderRadius: 6, fontWeight: 700 }}>🎨 彩色麥頭{o.color_mark_note ? `(${o.color_mark_note})` : ''}</span>}
                         {o.notes && <span style={{ fontSize: 12, background: '#f8fafc', color: '#475569', padding: '2px 8px', borderRadius: 6 }}>📝 {o.notes}</span>}
                       </div>
                       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', paddingTop: 8, borderTop: '1px dashed #f1f5f9' }}>
@@ -326,13 +345,12 @@ export default function OrdersPage({ user }) {
                           <button onClick={() => deleteOrder(o.id)} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 16, color: '#94a3b8', padding: '4px 6px' }}>🗑️</button>
                           <button onClick={() => changeStatus(o, -1)} disabled={o.status === 'pending'} style={{ background: '#fff', border: '1px solid #e2e8f0', borderRadius: 8, cursor: 'pointer', padding: '4px 8px', fontSize: 11, color: o.status === 'pending' ? '#e2e8f0' : '#475569' }}>退回上一狀態</button>
                           <button onClick={() => {
-                            if (o.status === 'shipped') return
-                            const labels = { pending: '排入行程', scheduled: '完成備貨', prepared: '確認出貨' }
-                            const nextStatuses = { pending: 'scheduled', scheduled: 'prepared', prepared: 'shipped' }
-                            setStatusDate(new Date().toISOString().slice(0,10))
-                            setStatusModal({ order: o, nextStatus: nextStatuses[o.status], label: labels[o.status] })
+                            const idx = STATES.indexOf(o.status)
+                            if (idx < 0 || o.status === 'shipped') return
+                            setStatusDate(formatDate(new Date()))
+                            setStatusModal({ order: o, nextStatus: STATES[idx + 1], label: NEXT_ACTION[o.status] })
                           }} style={{ background: th.header, color: '#fff', border: 'none', borderRadius: 8, cursor: 'pointer', padding: '6px 14px', fontWeight: 700, fontSize: 14 }}>
-                            {o.status === 'pending' ? '排入行程' : o.status === 'scheduled' ? '完成備貨' : o.status === 'prepared' ? '確認出貨' : '維持現狀'} ›
+                            {NEXT_ACTION[o.status] || '維持現狀'} ›
                           </button>
                         </div>
                       </div>
@@ -445,20 +463,26 @@ export default function OrdersPage({ user }) {
             <div style={{ fontSize: 13, color: '#64748b', marginBottom: 16 }}>
               {statusModal.order.customer_name || statusModal.order.customerName} ・ {statusModal.order.item_name || statusModal.order.itemName}
             </div>
+            {STAGE[statusModal.order.status]?.note ? (
+              <div style={{ fontSize: 14, color: th.accent, background: th.bg, borderRadius: 12, padding: '10px 12px', marginBottom: 16, lineHeight: 1.6 }}>
+                {STAGE[statusModal.order.status].note}
+              </div>
+            ) : (
             <div style={{ marginBottom: 16 }}>
               <div style={{ fontSize: 13, color: '#94a3b8', fontWeight: 700, marginBottom: 6 }}>
-                {statusModal.nextStatus === 'scheduled' ? '排程生產日' : statusModal.nextStatus === 'prepared' ? '完成備貨日期' : '確認出貨日期'}
+                {STAGE[statusModal.order.status]?.dateLabel || '日期'}
               </div>
               <input type="date" value={statusDate} onChange={e => setStatusDate(e.target.value)}
                 style={{ width: '100%', background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 12, padding: '10px', fontFamily: 'inherit', fontSize: 15 }} />
             </div>
+            )}
             <div style={{ display: 'flex', gap: 8 }}>
               <button onClick={() => setStatusModal(null)} style={{ flex: 1, padding: '11px', background: '#f1f5f9', border: 'none', borderRadius: 12, fontWeight: 700, color: '#64748b', cursor: 'pointer' }}>取消</button>
               <button onClick={async () => {
-                const states = ['pending', 'scheduled', 'prepared', 'shipped']
                 const updateData = { status: statusModal.nextStatus, updated_at: new Date().toISOString() }
-                if (statusModal.nextStatus === 'scheduled') updateData.scheduled_date = statusDate
-                await supabase.from('adv_orders').update(updateData).eq('id', statusModal.order.id)
+                if (statusModal.order.status === 'pending') updateData.scheduled_date = statusDate
+                const { error } = await supabase.from('adv_orders').update(updateData).eq('id', statusModal.order.id)
+                if (error) { alert('狀態更新失敗：' + error.message); return }
                 fetchOrders()
                 showToast(`${statusModal.label} ✅`)
                 setStatusModal(null)
@@ -624,7 +648,7 @@ export default function OrdersPage({ user }) {
 
             <div style={{ display: 'flex', gap: 8 }}>
               <button type="button" onClick={closeForm} style={{ flex: 1, padding: '12px', background: '#f1f5f9', border: 'none', borderRadius: 14, fontWeight: 700, color: '#64748b', cursor: 'pointer' }}>取消</button>
-              {!editingOrderId && formData.isMixedBox ? (
+              {!editingOrderId && formData.is_mixed_box ? (
                 <div style={{ flex: 2.5, display: 'flex', gap: 6 }}>
                   <button type="submit" onClick={() => { submitActionRef.current = 'continue' }} style={{ flex: 1, padding: '12px', background: '#fef3c7', border: 'none', borderRadius: 14, fontWeight: 700, color: '#92400e', cursor: 'pointer' }}>儲存續打</button>
                   <button type="submit" onClick={() => { submitActionRef.current = 'finish' }} style={{ flex: 1, padding: '12px', background: '#1e293b', color: '#fff', border: 'none', borderRadius: 14, fontWeight: 700, cursor: 'pointer' }}>完成裝箱</button>
