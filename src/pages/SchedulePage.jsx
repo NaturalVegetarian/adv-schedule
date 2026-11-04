@@ -98,7 +98,6 @@ export default function SchedulePage() {
   const [toast, setToast] = useState(null)
   const [saving, setSaving] = useState(false)
   const [orders, setOrders] = useState([])
-  const [flavorBasis, setFlavorBasis] = useState({})
   const [loaded, setLoaded] = useState(false)
   const [loadError, setLoadError] = useState('')
 
@@ -122,17 +121,13 @@ export default function SchedulePage() {
     load()
   }, [])
 
-  // 從 adv_orders 讀取未出貨客訂（計算庫存扣除），並讀取客訂管理的口味換算基準
+  // 從 adv_orders 讀取未出貨客訂（列在庫存表最右邊的「客訂出貨」欄）
   useEffect(() => {
     const fetchOrders = async () => {
       const { data } = await supabase.from('adv_orders').select('*').in('status', ['pending','packaging','scheduled','prepared'])
       if (data) setOrders(data)
     }
-    const fetchBasis = async () => {
-      const { data } = await supabase.from('adv_flavor_config').select('configs').eq('id', 'default').maybeSingle()
-      if (data?.configs) setFlavorBasis(data.configs)
-    }
-    fetchOrders(); fetchBasis()
+    fetchOrders()
     const ch = supabase.channel('sch_orders').on('postgres_changes', { event: '*', schema: 'public', table: 'adv_orders' }, () => fetchOrders()).subscribe()
     return () => supabase.removeChannel(ch)
   }, [])
@@ -158,36 +153,28 @@ export default function SchedulePage() {
 
   const DATES = useMemo(() => makeDates(startDate), [startDate])
 
-  // 客訂換算成「包」並放到出貨日當天扣除
-  // 換算與客訂管理的「正常量」相同：袋數 × 每袋顆數 ÷ 每包顆數（香羹以 kg 計）
-  // 沒填出貨日或出貨日已過 → 算在第一天；超出 45 天預估範圍 → 不扣
+  // 客訂出貨清單：依出貨日列在庫存表最右欄（只列出，不扣庫存——袋與包的換算待確認）
+  // 出貨日已過但還沒完成出貨 → 標「逾期」列在第一天；沒填出貨日 → 標「未定」列在第一天；超出 45 天 → 不列
   const orderInfo = useMemo(() => {
     const first = DATES[0].dt, last = DATES[DATES.length - 1].dt
-    const byDate = {}, custByDate = {}, total = {}
+    const custByDate = {}
+    let overdue = 0
     orders.forEach(o => {
       const name = o.item_name || o.itemName || ''
       const f = FL.find(x => name.includes(x))
       const qty = Number(o.quantity) || 0
-      const ppu = Number(o.pieces_per_unit ?? o.piecesPerUnit) || 0
-      const basis = Number(flavorBasis[name]) || (name.includes('香羹') ? 1 : 40)
-      const packs = Math.round(qty * ppu / basis)
       const td = parseShipDate(o.target_date || o.targetDate)
-      let k
-      if (!td || td < first) k = DATES[0].k
+      let k, tag = ''
+      if (!td) { k = DATES[0].k; tag = '未定 ' }
+      else if (td < first) { k = DATES[0].k; tag = '逾期 '; overdue++ }
       else if (td > last) return
       else k = `${td.getMonth()+1}/${td.getDate()}`
-      if (f && packs > 0) {
-        if (!byDate[k]) byDate[k] = {}
-        byDate[k][f] = (byDate[k][f] || 0) + packs
-        total[f] = (total[f] || 0) + packs
-      }
       const cust = o.customer_name || o.customerName || '未知客戶'
       if (!custByDate[k]) custByDate[k] = []
-      custByDate[k].push(`${cust} ${f || name} ${qty}${o.unit || '袋'}`)
+      custByDate[k].push(`${tag}${cust} ${f || name} ${qty}${o.unit || '袋'}`)
     })
-    return { byDate, custByDate, total }
-  }, [orders, flavorBasis, DATES])
-  const orderDeductions = orderInfo.total
+    return { custByDate, overdue }
+  }, [orders, DATES])
 
   const cInv = useCallback(() => {
     const im = {}, pm = {}
@@ -204,14 +191,13 @@ export default function SchedulePage() {
       let run = b.c
       res[f] = DATES.map(d => {
         run -= b.d
-        run -= orderInfo.byDate[d.k]?.[f] || 0
         if (im[d.k]?.[f]) run += im[d.k][f]
         run = Math.max(0, run)
         return { v: Math.round(run), p: !!(pm[d.k]?.has(f)) }
       })
     })
     return res
-  }, [schData, bi, orderInfo, DATES])
+  }, [schData, bi, DATES])
 
   const invTable = useMemo(() => cInv(), [cInv])
   const tot = schData.reduce((s, r) => s + (PPB[r.item]||0) * (r.barrels||0), 0)
@@ -222,7 +208,6 @@ export default function SchedulePage() {
     })
   }
 
-  const deductSummary = Object.entries(orderDeductions).filter(([,v]) => v > 0)
 
   // 當日客訂出貨（用於庫存表旁邊顯示）
   const todayShip = useMemo(() => {
@@ -283,8 +268,7 @@ export default function SchedulePage() {
       const hasSch = schData.some(r => r.item === f)
       const isSub = SUB.includes(f)
       const fsub = fi === MAIN.length
-      const deduct = orderDeductions[f] || 0
-      h += `<th class="${hasSch ? 'hs' : ''}" style="${fsub ? 'border-left:3px solid #94a3b8!important' : ''}">${f}${deduct > 0 ? `<br><span style="font-size:8px;color:#ef4444;background:#fef2f2;border-radius:2px;padding:0 2px">-${deduct}</span>` : ''}${isSub ? '<br><span style="font-size:8px;background:#ede9fe;color:#5b21b6;border-radius:2px;padding:0 2px">副</span>' : ''}${hasSch ? `<br><span style="font-size:8px;background:${isSub ? '#5b21b6' : '#1e293b'};color:#fff;border-radius:2px;padding:0 3px">排</span>` : ''}</th>`
+      h += `<th class="${hasSch ? 'hs' : ''}" style="${fsub ? 'border-left:3px solid #94a3b8!important' : ''}">${f}${isSub ? '<br><span style="font-size:8px;background:#ede9fe;color:#5b21b6;border-radius:2px;padding:0 2px">副</span>' : ''}${hasSch ? `<br><span style="font-size:8px;background:${isSub ? '#5b21b6' : '#1e293b'};color:#fff;border-radius:2px;padding:0 3px">排</span>` : ''}</th>`
     })
     h += `<th style="text-align:left;min-width:150px;border-left:3px solid #94a3b8!important">客訂出貨</th>`
     h += '</tr></thead><tbody>'
@@ -303,12 +287,12 @@ export default function SchedulePage() {
         h += `<td class="ic ${cls}${p ? ' hp' : ''}" style="${fsub ? 'border-left:3px solid #94a3b8!important' : ''}"><div class="ci"><div class="cn">${v.toLocaleString()}</div><div class="bw"><div class="bf" style="width:${pct}%"></div></div></div></td>`
       })
       const cs = orderInfo.custByDate[d.k] || []
-      h += `<td style="text-align:left;font-size:11px;color:#065f46;white-space:nowrap;padding:2px 6px;border-left:3px solid #94a3b8!important">${cs.map(esc).join('<br>')}</td>`
+      h += `<td style="text-align:left;font-size:11px;color:#065f46;white-space:nowrap;padding:2px 6px;border-left:3px solid #94a3b8!important">${cs.map(c => c.startsWith('逾期 ') ? `<span style="color:#c2410c">${esc(c)}</span>` : esc(c)).join('<br>')}</td>`
       h += '</tr>'
     })
     h += '</tbody>'
     return h
-  }, [invTable, schData, bi, orderDeductions, orderInfo, DATES])
+  }, [invTable, schData, bi, orderInfo, DATES])
 
   return (
     <div>
@@ -325,10 +309,10 @@ export default function SchedulePage() {
         </div>
       )}
 
-      {/* 客訂扣除提示 */}
-      {deductSummary.length > 0 && (
-        <div style={{ background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 10, padding: '8px 12px', marginBottom: 10, fontSize: 14, color: '#7f1d1d' }}>
-          <strong>客訂庫存扣除：</strong> {deductSummary.map(([f, v]) => `${f} -${v}包`).join(' · ')}（單位：包，未出貨客訂已依出貨日從預估庫存扣除）
+      {/* 逾期未出貨提示 */}
+      {orderInfo.overdue > 0 && (
+        <div style={{ background: '#fff7ed', border: '1px solid #fed7aa', borderRadius: 10, padding: '8px 12px', marginBottom: 10, fontSize: 14, color: '#7c2d12' }}>
+          <strong>⚠ 有 {orderInfo.overdue} 筆客訂已過出貨日、還沒按「完成出貨」</strong>，列在庫存表最右欄第一天（橘字「逾期」），請到客訂管理確認狀態。
         </div>
       )}
 
@@ -416,7 +400,7 @@ export default function SchedulePage() {
         <div style={{ overflowX: 'auto', maxHeight: 380, overflowY: 'auto' }}>
           <table className="it" dangerouslySetInnerHTML={{ __html: invHTML }}></table>
         </div>
-        <div style={{ fontSize: 12, color: '#94a3b8', marginTop: 5 }}>粗框=當日入庫 · 條=庫存/最低庫存 · 雙線=月份 · ║=主∣副 · 紅字=客訂扣除包數 · 最右欄=當日出貨客戶</div>
+        <div style={{ fontSize: 12, color: '#94a3b8', marginTop: 5 }}>粗框=當日入庫 · 條=庫存/最低庫存 · 雙線=月份 · ║=主∣副 · 最右欄=當日出貨客戶（只列出，不扣庫存）</div>
       </div>
 
       {/* 排程輸入 */}

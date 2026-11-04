@@ -6,7 +6,7 @@ const INIT_SALE = [
   { f: '新鮮', d: 41, m: 571, isMain: true },  { f: '剝皮', d: 53, m: 888, isMain: true },
   { f: '酸白', d: 28, m: 424, isMain: true },  { f: '原味', d: 44, m: 337, isMain: true },
   { f: '紅燒', d: 4,  m: 100, isMain: false }, { f: '藥膳', d: 1,  m: 30,  isMain: false },
-  { f: '珍菇', d: 2,  m: 50,  isMain: false }, { f: '香薑', d: 6,  m: 100, isMain: false },
+  { f: '珍菇', d: 2,  m: 50,  isMain: false }, { f: '香羹', d: 6,  m: 100, isMain: false },
   { f: '猴菇', d: 1,  m: 50,  isMain: false }, { f: '油飯', d: 3,  m: 50,  isMain: false },
 ]
 

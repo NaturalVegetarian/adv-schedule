@@ -1,14 +1,14 @@
 import { useState } from 'react'
 
 const FL_MAIN = ['黃金','泡菜','咖哩','素花','新鮮','剝皮','酸白','原味']
-const FL_SUB  = ['紅燒','藥膳','珍菇','香薑','猴菇','油飯']
+const FL_SUB  = ['紅燒','藥膳','珍菇','香羹','猴菇','油飯']
 const ALL     = [...FL_MAIN, ...FL_SUB]
 const MAX_CAP = 12000
 
-const DAILY = {黃金:83,泡菜:38,咖哩:11,素花:60,新鮮:41,剝皮:53,酸白:28,原味:44,紅燒:4,藥膳:1,珍菇:2,香薑:6,猴菇:1,油飯:3}
-const INIT_CUR = {黃金:1941,泡菜:625,咖哩:680,素花:1754,新鮮:789,剝皮:1299,酸白:618,原味:1585,紅燒:70,藥膳:31,珍菇:50,香薑:26,猴菇:69,油飯:60}
-const INIT_MN  = {黃金:1716,泡菜:638,咖哩:347,素花:1194,新鮮:571,剝皮:888,酸白:424,原味:337,紅燒:100,藥膳:30,珍菇:50,香薑:100,猴菇:50,油飯:50}
-const INIT_MX_SUB = {紅燒:300,藥膳:200,珍菇:200,香薑:200,猴菇:200,油飯:150}
+const DAILY = {黃金:83,泡菜:38,咖哩:11,素花:60,新鮮:41,剝皮:53,酸白:28,原味:44,紅燒:4,藥膳:1,珍菇:2,香羹:6,猴菇:1,油飯:3}
+const INIT_CUR = {黃金:1941,泡菜:625,咖哩:680,素花:1754,新鮮:789,剝皮:1299,酸白:618,原味:1585,紅燒:70,藥膳:31,珍菇:50,香羹:26,猴菇:69,油飯:60}
+const INIT_MN  = {黃金:1716,泡菜:638,咖哩:347,素花:1194,新鮮:571,剝皮:888,酸白:424,原味:337,紅燒:100,藥膳:30,珍菇:50,香羹:100,猴菇:50,油飯:50}
+const INIT_MX_SUB = {紅燒:300,藥膳:200,珍菇:200,香羹:200,猴菇:200,油飯:150}
 
 const totalD = FL_MAIN.reduce((s,f) => s + DAILY[f], 0)
 
@@ -21,7 +21,7 @@ const LBL={f:'充足',o:'充足',l:'偏低',w:'紅燈',r:'緊急',g:'灰燈'}
 export default function InventoryPage() {
   const [inv,  setInv]  = useState(INIT_CUR)
   const [mn,   setMn]   = useState(INIT_MN)
-  const [date, setDate] = useState('2026/05/07')
+  const [date, setDate] = useState(() => { const t = new Date(); return `${t.getFullYear()}/${String(t.getMonth()+1).padStart(2,'0')}/${String(t.getDate()).padStart(2,'0')}` })
   const [bonus,  setBonus]  = useState(Object.fromEntries(FL_MAIN.map(f=>[f,0])))
   const [mxSub,  setMxSub]  = useState(INIT_MX_SUB)
   const [refill, setRefill] = useState(Object.fromEntries(ALL.map(f=>[f,''])))
@@ -132,8 +132,9 @@ export default function InventoryPage() {
               <th style={{fontSize:14}}>狀態</th>
             </tr></thead>
             <tbody>
-              <InvRows flavors={FL_MAIN} title="主產品（水餃・餡餅・湯包）"/>
-              <InvRows flavors={FL_SUB}  title="副產品"/>
+              {/* 用函式呼叫而不是 <InvRows/>，避免每打一個字整列重建、游標跑掉跳回頂端 */}
+              {InvRows({ flavors: FL_MAIN, title: '主產品（水餃・餡餅・湯包）' })}
+              {InvRows({ flavors: FL_SUB, title: '副產品' })}
             </tbody>
           </table>
         </div>
@@ -164,8 +165,8 @@ export default function InventoryPage() {
               <th style={{textAlign:'right',fontSize:14}}>可補充%<br/><span style={{fontSize:11,fontWeight:400,color:'#94a3b8'}}>手動輸入</span></th>
             </tr></thead>
             <tbody>
-              <UpperRows flavors={FL_MAIN} title="主產品（水餃・餡餅・湯包）"/>
-              <UpperRows flavors={FL_SUB}  title="副產品"/>
+              {UpperRows({ flavors: FL_MAIN, title: '主產品（水餃・餡餅・湯包）' })}
+              {UpperRows({ flavors: FL_SUB, title: '副產品' })}
             </tbody>
           </table>
         </div>
