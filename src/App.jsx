@@ -6,11 +6,12 @@ import SchedulePage from './pages/SchedulePage'
 import OrdersPage from './pages/OrdersPage'
 import PickingPage from './pages/PickingPage'
 
+// 頁籤順序與負責科別對照 Excel 生產預估表的工作表
 const TABS = [
-  { id: 'sales',  label: '銷售計畫' },
-  { id: 'inv',    label: '庫存狀況' },
-  { id: 'sch',    label: '排程引擎' },
-  { id: 'orders', label: '客訂管理' },
+  { id: 'sales',  label: '銷售計畫', step: '①', dept: '銷貨科' },
+  { id: 'inv',    label: '庫存狀況', step: '②', dept: '成品倉庫管理科' },
+  { id: 'sch',    label: '生產排程', step: '③', dept: '生產排程科' },
+  { id: 'orders', label: '客訂管理', dept: '各科' },
   { id: 'pick',   label: '領料工具' },
 ]
 
@@ -63,8 +64,10 @@ export default function App() {
       {/* 頁簽 */}
       <div className="main-tabs">
         {TABS.map(t => (
-          <div key={t.id} className={`main-tab${activeTab === t.id ? ' active' : ''}`} onClick={() => setActiveTab(t.id)}>
-            {t.label}
+          <div key={t.id} className={`main-tab${activeTab === t.id ? ' active' : ''}`} onClick={() => setActiveTab(t.id)}
+            style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', lineHeight: 1.25, paddingTop: 8, paddingBottom: 6 }}>
+            <span>{t.step ? `${t.step} ` : ''}{t.label}</span>
+            {t.dept && <span style={{ fontSize: 11, fontWeight: 500, opacity: 0.8 }}>{t.dept}</span>}
           </div>
         ))}
       </div>
