@@ -1,6 +1,7 @@
 import { useState, useEffect, useMemo, useRef } from 'react'
 import { supabase } from '../lib/supabase'
 import { toIso, todayIso, addDays } from '../lib/flavors'
+import { loadPage, savePageData } from '../lib/pageSave'
 
 // 訂單流程（資料庫狀態值不變，只改顯示名稱）：
 // 等待排程(生產排程科) → 包材準備(原物料倉庫管理科) → 完成備貨(包裝科) → 確認出貨(出貨交運科) → 完成出貨
@@ -17,6 +18,39 @@ const ANOMALY = 'anomaly'
 const SOON_DAYS = 2 // 幾天內要出貨、卻還沒完成備貨，算「即將到期」
 const STATUS_LABEL = Object.fromEntries(STATES.map(s => [s, STAGE[s].tab]))
 const NEXT_ACTION = Object.fromEntries(STATES.filter(s => STAGE[s].action).map(s => [s, STAGE[s].action]))
+
+// ── 包材：內包裝（原包裝／真空袋＋尺寸）＋貼紙（尺寸、送印／自印、內容）＋倉管勾選 ──
+// 存在 adv_orders.pack（jsonb），第一次使用要先在 Supabase SQL Editor 執行 PACK_SQL
+const EMPTY_PACK = { inner: '', bagSize: '', sticker: false, stickerSize: '', stickerPrint: '', stickerNote: '', checks: {} }
+const DEFAULT_SIZES = { bag: [], sticker: ['10×15'] }
+const PACK_SQL = "alter table adv_orders add column if not exists pack jsonb default '{}'::jsonb;"
+const PACK_SQL_MSG = `「包材」欄位還沒建立，包材資料沒存到。\n請到 Supabase 的 SQL Editor 貼上這一行按 Run（只要做一次）：\n\n${PACK_SQL}`
+const isPackColErr = e => /pack/i.test(e?.message || '') && /column|schema/i.test(e?.message || '')
+const normSize = s => String(s || '').trim().replace(/\s+/g, '').replace(/[*xX＊✕]/g, '×') // 10*15 → 10×15
+const uniq = a => [...new Set(a.filter(Boolean))]
+const fmtMDHM = iso => {
+  const d = new Date(iso)
+  return isNaN(d) ? '' : `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+}
+
+// 這張訂單要準備的包材（包材準備關卡給倉管勾）。勾的時候記下規格，之後訂單規格改了就要重新勾
+function packItems(o, boxes) {
+  const pk = { ...EMPTY_PACK, ...(o.pack || {}) }
+  const ck = pk.checks || {}
+  const bags = Number(o.quantity) || 0
+  const list = []
+  const bt = o.box_type || o.boxType
+  if (bt) list.push({ key: 'box', name: '外箱', spec: `${bt}${boxes ? ` × ${boxes} 箱` : ''}` })
+  if (o.shipping_mark || o.shippingMark) list.push({ key: 'mark', name: '一般麥頭', spec: boxes ? `${boxes} 箱用` : '' })
+  if (o.color_mark) list.push({ key: 'color', name: '彩色麥頭', spec: [o.color_mark_note, boxes ? `${boxes} 箱用` : ''].filter(Boolean).join(' · ') })
+  if (pk.inner === '真空袋') list.push({ key: 'inner', name: '真空袋', spec: `${pk.bagSize || '尺寸未填'} × ${bags} 個` })
+  if (pk.inner === '原包裝') list.push({ key: 'inner', name: '原包裝', spec: `自家熱印 × ${bags} 袋` })
+  if (pk.sticker) list.push({ key: 'sticker', name: '貼紙', spec: [`${pk.stickerSize || '尺寸未填'} × ${bags} 張`, pk.stickerPrint, pk.stickerNote].filter(Boolean).join(' · ') })
+  return list.map(it => {
+    const v = `${it.name}|${it.spec}`, c = ck[it.key]
+    return { ...it, v, done: !!c && c.v === v, at: c?.at }
+  })
+}
 
 // 出貨日統一成 YYYY-MM-DD（舊資料可能是 2026/11/4 或 11/4）
 export const shipDateOf = o => toIso(o.target_date || o.targetDate)
@@ -64,6 +98,9 @@ export default function OrdersPage({ user }) {
   const [useBoxCalc, setUseBoxCalc] = useState(false)
   const [boxCountInput, setBoxCountInput] = useState('')
   const [boxQtyInput, setBoxQtyInput] = useState('')
+  const [packSizes, setPackSizes] = useState(DEFAULT_SIZES) // 真空袋／貼紙尺寸清單
+  const [addingSize, setAddingSize] = useState(null) // 'bag' | 'sticker'：正在新增哪一種尺寸
+  const [newSize, setNewSize] = useState('')
 
   // 欄位名稱對照原始資料庫（camelCase 舊欄位 + snake_case 新欄位）
   const emptyForm = {
@@ -75,6 +112,7 @@ export default function OrdersPage({ user }) {
     weight_per_bag: 5250,
     color_mark: false, color_mark_note: '',
     box_count: 0, box_qty_each: 0,
+    pack: EMPTY_PACK,
   }
   const [formData, setFormData] = useState(emptyForm)
 
@@ -96,14 +134,59 @@ export default function OrdersPage({ user }) {
       if (data?.items) setSavedItems(data.items)
     }
     fetchConfig()
+    loadPage('pack').then(({ data }) => {
+      const d = data?.data
+      if (d) setPackSizes({ bag: uniq([...DEFAULT_SIZES.bag, ...(d.bag || [])]), sticker: uniq([...DEFAULT_SIZES.sticker, ...(d.sticker || [])]) })
+    })
   }, [])
+
+  // 尺寸選單＝尺寸清單＋訂單裡用過的尺寸（清單沒存到也不會不見）
+  const allSizes = useMemo(() => ({
+    bag: uniq([...packSizes.bag, ...orders.map(o => o.pack?.bagSize)]),
+    sticker: uniq([...packSizes.sticker, ...orders.map(o => o.pack?.stickerSize)]),
+  }), [packSizes, orders])
 
   const showToast = msg => { setToast(msg); setTimeout(() => setToast(null), 3000) }
 
   const handleInputChange = e => {
     const { name, value, type, checked } = e.target
-    setFormData(p => ({ ...p, [name]: type === 'checkbox' ? checked : value }))
+    setFormData(p => {
+      const n = { ...p, [name]: type === 'checkbox' ? checked : value }
+      // 營業用：預設 真空袋＋貼紙 10×15（還沒選過內包裝才帶入，可再改）
+      if (name === 'item_name' && String(value).includes('營業用') && !p.pack?.inner) {
+        n.pack = { ...EMPTY_PACK, ...(p.pack || {}), inner: '真空袋', sticker: true, stickerSize: p.pack?.stickerSize || '10×15' }
+      }
+      return n
+    })
     if (formError) setFormError('')
+  }
+
+  // 包材欄位
+  const setPack = patch => {
+    setFormData(p => ({ ...p, pack: { ...EMPTY_PACK, ...(p.pack || {}), ...patch } }))
+    if (formError) setFormError('')
+  }
+  const addSize = kind => {
+    const s = normSize(newSize)
+    if (!s) return
+    const next = { ...packSizes, [kind]: uniq([...(packSizes[kind] || []), s]) }
+    setPackSizes(next)
+    savePageData('pack', next).then(r => { if (r?.error) console.warn('尺寸清單同步失敗：', r.error.message) })
+    setPack(kind === 'bag' ? { bagSize: s } : { stickerSize: s })
+    setNewSize(''); setAddingSize(null)
+    showToast(`已新增尺寸 ${s} ✅`)
+  }
+
+  // 包材準備：倉管勾選（勾的時候記時間＋當下規格）
+  const toggleCheck = async (o, it) => {
+    const pk = { ...EMPTY_PACK, ...(o.pack || {}) }
+    const checks = { ...(pk.checks || {}) }
+    if (it.done) delete checks[it.key]
+    else checks[it.key] = { at: new Date().toISOString(), v: it.v }
+    const pack = { ...pk, checks }
+    setOrders(list => list.map(x => (x.id === o.id ? { ...x, pack } : x)))
+    const { error } = await supabase.from('adv_orders').update({ pack, updated_at: new Date().toISOString() }).eq('id', o.id)
+    if (error) { alert(isPackColErr(error) ? '勾選沒存到：' + PACK_SQL_MSG : '勾選沒存到：' + error.message); fetchOrders() }
   }
 
   const calcedQty = useMemo(() => {
@@ -118,6 +201,10 @@ export default function OrdersPage({ user }) {
     if (!formData.customer_name.trim()) { setFormError('請填寫客戶名稱'); return }
     if (!formData.item_name) { setFormError('請選擇口味品項'); return }
     if (!formData.target_date) { setFormError('請選擇指定出貨日'); return }
+    const pk = { ...EMPTY_PACK, ...(formData.pack || {}) }
+    if (pk.inner === '真空袋' && !pk.bagSize) { setFormError('請選真空袋尺寸（沒有的話按「＋ 新增尺寸」）'); return }
+    if (pk.sticker && !pk.stickerSize) { setFormError('請選貼紙尺寸'); return }
+    if (pk.sticker && !pk.stickerPrint) { setFormError('請選貼紙是「送印」還是「自印」'); return }
 
     let finalQty = 0
     if (useBoxCalc) {
@@ -137,6 +224,11 @@ export default function OrdersPage({ user }) {
       weight_per_bag: Number(formData.weight_per_bag) || 5250,
       box_count: useBoxCalc ? parseInt(boxCountInput) || 0 : 0,
       box_qty_each: useBoxCalc ? parseInt(boxQtyInput) || 0 : 0,
+      pack: {
+        ...pk, stickerNote: (pk.stickerNote || '').trim(),
+        bagSize: pk.inner === '真空袋' ? pk.bagSize : '',
+        ...(pk.sticker ? {} : { stickerSize: '', stickerPrint: '', stickerNote: '' }),
+      },
     })
     setIsConfirmOpen(true)
   }
@@ -146,18 +238,26 @@ export default function OrdersPage({ user }) {
     const id = editingOrderId || `order_${Date.now()}`
     const existingOrder = orders.find(o => o.id === editingOrderId)
     try {
-      const { error } = await supabase.from('adv_orders').upsert({
+      const row = {
         id, ...pendingOrderData,
         status: existingOrder?.status || 'pending',
         created_at: existingOrder?.created_at || new Date().toISOString(),
         created_by: user?.session?.user?.id,
         updated_at: new Date().toISOString()
-      })
+      }
+      let { error } = await supabase.from('adv_orders').upsert(row)
+      let packMissing = false
+      if (error && isPackColErr(error)) { // 資料庫還沒有 pack 欄位：先存訂單本身，再提醒執行 SQL
+        const { pack, ...rest } = row
+        ;({ error } = await supabase.from('adv_orders').upsert(rest))
+        packMissing = !error
+      }
       if (error) throw error
+      if (packMissing) alert('訂單已存，但' + PACK_SQL_MSG)
       showToast(editingOrderId ? '訂單修改成功 ✅' : '訂單已儲存 ✅')
       fetchOrders()
       if (formData.is_mixed_box && submitActionRef.current === 'continue' && !editingOrderId) {
-        setFormData(p => ({ ...p, item_name: '', quantity: '', notes: '' }))
+        setFormData(p => ({ ...p, item_name: '', quantity: '', notes: '', pack: { ...EMPTY_PACK, ...(p.pack || {}), checks: {} } }))
         setBoxCountInput(''); setBoxQtyInput('')
         setIsConfirmOpen(false); setPendingOrderData(null)
       } else { setIsConfirmOpen(false); setPendingOrderData(null); closeForm() }
@@ -177,11 +277,12 @@ export default function OrdersPage({ user }) {
   const closeForm = () => {
     setIsFormOpen(false); setEditingOrderId(null); setIsAddingNewItem(false)
     setFormError(''); setUseBoxCalc(false); setBoxCountInput(''); setBoxQtyInput('')
+    setAddingSize(null); setNewSize('')
     setFormData(emptyForm)
   }
 
   const openEditForm = order => {
-    setFormData({ ...emptyForm, ...order })
+    setFormData({ ...emptyForm, ...order, pack: { ...EMPTY_PACK, ...(order.pack || {}) } })
     if ((order.box_count||0) > 0) { setUseBoxCalc(true); setBoxCountInput(String(order.box_count)); setBoxQtyInput(String(order.box_qty_each)) }
     setEditingOrderId(order.id); setIsFormOpen(true)
   }
@@ -283,6 +384,12 @@ export default function OrdersPage({ user }) {
   const th = THEME[activeTab] || THEME.pending
   // 推進狀態的視窗用「該筆訂單所在關卡」的顏色（從異常狀態按也一樣）
   const mth = (statusModal && THEME[statusModal.order.status]) || th
+  // 按「包材備妥」時：包材清單還有哪些沒勾（用最新的訂單資料）
+  const modalLeft = statusModal?.order.status === 'packaging' ? (() => {
+    const mo = orders.find(x => x.id === statusModal.order.id) || statusModal.order
+    const its = packItems(mo, getBoxCount(mo))
+    return { total: its.length, left: its.filter(it => !it.done) }
+  })() : null
 
   // 異常狀態分頁內容（用函式呼叫，不寫成元件，避免重建）
   const renderAnomaly = () => {
@@ -450,6 +557,10 @@ export default function OrdersPage({ user }) {
                   const ipb = Math.round(Number(o.items_per_box||o.itemsPerBox)) || 0
                   let boxDisplay = ''
                   if (ipb > 0) { const boxes = Math.floor(Number(o.quantity) / ipb), rem = Number(o.quantity) % ipb; boxDisplay = `${boxes}箱${rem > 0 ? ` + ${rem}袋` : ''}` }
+                  const pk = { ...EMPTY_PACK, ...(o.pack || {}) }
+                  const pItems = packItems(o, getBoxCount(o))
+                  const showChecklist = o.status === 'packaging' && pItems.length > 0 // 包材準備：外箱、麥頭、內包裝、貼紙改成勾選清單
+                  const pDone = pItems.filter(it => it.done).length
                   return (
                     <div key={o.id} style={{ padding: '16px', borderBottom: `1px solid #f8fafc` }}>
                       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 8 }}>
@@ -467,11 +578,31 @@ export default function OrdersPage({ user }) {
                         </div>
                       </div>
                       <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 8 }}>
-                        {(o.box_type||o.boxType) && <span style={{ fontSize: 12, background: '#eff6ff', color: '#1d4ed8', padding: '2px 8px', borderRadius: 6, fontWeight: 700 }}>{o.box_type||o.boxType}</span>}
-                        {!hasMultipleSub && (o.shipping_mark||o.shippingMark) && <span style={{ fontSize: 12, background: '#fef2f2', color: '#ef4444', padding: '2px 8px', borderRadius: 6, fontWeight: 700 }}>🏷️ 一般麥頭</span>}
-                        {!hasMultipleSub && o.color_mark && <span style={{ fontSize: 12, background: '#fdf4ff', color: '#7e22ce', padding: '2px 8px', borderRadius: 6, fontWeight: 700 }}>🎨 彩色麥頭{o.color_mark_note ? `(${o.color_mark_note})` : ''}</span>}
+                        {!showChecklist && <>
+                          {(o.box_type||o.boxType) && <span style={{ fontSize: 12, background: '#eff6ff', color: '#1d4ed8', padding: '2px 8px', borderRadius: 6, fontWeight: 700 }}>{o.box_type||o.boxType}</span>}
+                          {!hasMultipleSub && (o.shipping_mark||o.shippingMark) && <span style={{ fontSize: 12, background: '#fef2f2', color: '#ef4444', padding: '2px 8px', borderRadius: 6, fontWeight: 700 }}>🏷️ 一般麥頭</span>}
+                          {!hasMultipleSub && o.color_mark && <span style={{ fontSize: 12, background: '#fdf4ff', color: '#7e22ce', padding: '2px 8px', borderRadius: 6, fontWeight: 700 }}>🎨 彩色麥頭{o.color_mark_note ? `(${o.color_mark_note})` : ''}</span>}
+                          {pk.inner && <span style={{ fontSize: 12, background: '#f5f3ff', color: '#6d28d9', padding: '2px 8px', borderRadius: 6, fontWeight: 700 }}>🛍 {pk.inner === '真空袋' ? `真空袋 ${pk.bagSize}` : '原包裝（熱印）'}</span>}
+                          {pk.sticker && <span style={{ fontSize: 12, background: '#fffbeb', color: '#b45309', padding: '2px 8px', borderRadius: 6, fontWeight: 700 }}>🏷 貼紙 {[pk.stickerSize, pk.stickerPrint, pk.stickerNote].filter(Boolean).join('·')}</span>}
+                        </>}
                         {o.notes && <span style={{ fontSize: 12, background: '#f8fafc', color: '#475569', padding: '2px 8px', borderRadius: 6 }}>📝 {o.notes}</span>}
                       </div>
+                      {showChecklist && (
+                        <div style={{ background: '#faf5ff', border: '1px solid #e9d5ff', borderRadius: 12, padding: '8px 10px', marginBottom: 8 }}>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: 13, fontWeight: 800, color: '#6d28d9', marginBottom: 2 }}>
+                            <span>📋 包材清單（倉管勾選）</span>
+                            <span style={{ color: pDone === pItems.length ? '#059669' : '#b45309' }}>{pDone}/{pItems.length} 已備妥</span>
+                          </div>
+                          {pItems.map(it => (
+                            <label key={it.key} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 2px', cursor: 'pointer', borderTop: '1px dashed #ede9fe' }}>
+                              <input type="checkbox" checked={it.done} onChange={() => toggleCheck(o, it)} style={{ width: 19, height: 19, accentColor: '#7c3aed', flexShrink: 0 }} aria-label={`包材 ${it.name}`} />
+                              <span style={{ fontWeight: 800, fontSize: 14, minWidth: 64, color: it.done ? '#94a3b8' : '#1e293b', textDecoration: it.done ? 'line-through' : 'none' }}>{it.name}</span>
+                              <span style={{ fontSize: 13, flex: 1, color: it.done ? '#94a3b8' : '#475569' }}>{it.spec}</span>
+                              {it.done && <span style={{ fontSize: 11, color: '#059669', whiteSpace: 'nowrap' }}>✓ {fmtMDHM(it.at)}</span>}
+                            </label>
+                          ))}
+                        </div>
+                      )}
                       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', paddingTop: 8, borderTop: '1px dashed #f1f5f9' }}>
                         <div style={{ fontSize: 12, color: '#94a3b8' }}>
                           {(o.scheduled_date||o.scheduledDate) && <div>排程：{o.scheduled_date||o.scheduledDate}</div>}
@@ -539,6 +670,13 @@ export default function OrdersPage({ user }) {
             {STAGE[statusModal.order.status]?.note ? (
               <div style={{ fontSize: 14, color: mth.accent, background: mth.bg, borderRadius: 12, padding: '10px 12px', marginBottom: 16, lineHeight: 1.6 }}>
                 {STAGE[statusModal.order.status].note}
+                {modalLeft && modalLeft.total > 0 && (
+                  <div style={{ marginTop: 8, fontWeight: 800, color: modalLeft.left.length ? '#b45309' : '#047857' }}>
+                    {modalLeft.left.length
+                      ? `⚠ 包材清單還有 ${modalLeft.left.length} 項沒勾：${modalLeft.left.map(it => it.name).join('、')}`
+                      : `✅ 包材清單 ${modalLeft.total}/${modalLeft.total} 都已勾選`}
+                  </div>
+                )}
               </div>
             ) : (
             <div style={{ marginBottom: 16 }}>
@@ -559,7 +697,7 @@ export default function OrdersPage({ user }) {
                 fetchOrders()
                 showToast(`${statusModal.label} ✅`)
                 setStatusModal(null)
-              }} style={{ flex: 2, padding: '11px', background: mth.header, color: '#fff', border: 'none', borderRadius: 12, fontWeight: 900, cursor: 'pointer' }}>確認 {statusModal.label}</button>
+              }} style={{ flex: 2, padding: '11px', background: mth.header, color: '#fff', border: 'none', borderRadius: 12, fontWeight: 900, cursor: 'pointer' }}>{modalLeft?.left.length ? '仍要確認' : '確認'} {statusModal.label}</button>
             </div>
           </div>
         </div>
@@ -591,6 +729,8 @@ export default function OrdersPage({ user }) {
               {(pendingOrderData.items_per_box||pendingOrderData.itemsPerBox||0) > 0 && <div style={{ background: '#f0fdf4', borderRadius: 8, padding: '6px 10px', fontSize: 13, fontWeight: 700, color: '#166534' }}>每箱{pendingOrderData.items_per_box||pendingOrderData.itemsPerBox}袋</div>}
               {(pendingOrderData.shipping_mark||pendingOrderData.shippingMark) && <div style={{ background: '#fef2f2', borderRadius: 8, padding: '6px 10px', fontSize: 13, fontWeight: 700, color: '#dc2626' }}>🏷️ 一般麥頭</div>}
               {pendingOrderData.color_mark && <div style={{ background: '#fdf4ff', borderRadius: 8, padding: '6px 10px', fontSize: 13, fontWeight: 700, color: '#7e22ce' }}>🎨 彩色麥頭{pendingOrderData.color_mark_note ? `(${pendingOrderData.color_mark_note})` : ''}</div>}
+              {pendingOrderData.pack?.inner && <div style={{ background: '#f5f3ff', borderRadius: 8, padding: '6px 10px', fontSize: 13, fontWeight: 700, color: '#6d28d9' }}>🛍 {pendingOrderData.pack.inner === '真空袋' ? `真空袋 ${pendingOrderData.pack.bagSize}` : '原包裝（自家熱印）'}</div>}
+              {pendingOrderData.pack?.sticker && <div style={{ background: '#fffbeb', borderRadius: 8, padding: '6px 10px', fontSize: 13, fontWeight: 700, color: '#b45309' }}>🏷 貼紙 {[pendingOrderData.pack.stickerSize, pendingOrderData.pack.stickerPrint, pendingOrderData.pack.stickerNote].filter(Boolean).join('·')}</div>}
             </div>
             <button onClick={executeSave} style={{ width: '100%', padding: '12px', background: '#059669', color: '#fff', border: 'none', borderRadius: 16, fontWeight: 900, fontSize: 15, cursor: 'pointer', marginBottom: 8 }}>確認無誤，正式存檔</button>
             <button onClick={() => setIsConfirmOpen(false)} style={{ width: '100%', padding: '10px', background: '#f1f5f9', color: '#64748b', border: 'none', borderRadius: 16, fontWeight: 700, cursor: 'pointer' }}>返回修改</button>
@@ -666,6 +806,66 @@ export default function OrdersPage({ user }) {
                 <input type="text" name="color_mark_note" value={formData.color_mark_note} onChange={handleInputChange} placeholder="顏色說明（例：紅色）" style={{ width: '100%', background: '#fff', border: 'none', borderRadius: 10, padding: '8px 10px', fontFamily: 'inherit', marginTop: 6, fontSize: 13 }} />
               )}
             </div>
+
+            {/* 包材：內包裝（原包裝／真空袋＋尺寸）＋貼紙（尺寸、送印／自印、內容） */}
+            {(() => {
+              const pk = { ...EMPTY_PACK, ...(formData.pack || {}) }
+              const seg = on => ({ flex: 1, padding: '8px 6px', borderRadius: 10, border: `1px solid ${on ? '#7c3aed' : '#ddd6fe'}`, background: on ? '#7c3aed' : '#fff', color: on ? '#fff' : '#6d28d9', fontWeight: 800, fontSize: 13, cursor: 'pointer', fontFamily: 'inherit' })
+              const sizeRow = (kind, label, value, pick) => (
+                <div style={{ marginBottom: 8 }}>
+                  <div style={{ fontSize: 12, color: '#7c3aed', marginBottom: 3 }}>{label}</div>
+                  <div style={{ display: 'flex', gap: 6 }}>
+                    <select value={value} onChange={e => pick(e.target.value)} aria-label={label}
+                      style={{ flex: 1, background: '#fff', border: value ? 'none' : '1px solid #f59e0b', borderRadius: 10, padding: '8px', fontFamily: 'inherit' }}>
+                      <option value="">選擇尺寸</option>
+                      {allSizes[kind].map(s => <option key={s} value={s}>{s}</option>)}
+                    </select>
+                    <button type="button" onClick={() => { setAddingSize(kind); setNewSize('') }}
+                      style={{ background: '#fff', border: '1px dashed #a78bfa', borderRadius: 10, padding: '0 10px', color: '#6d28d9', fontWeight: 700, cursor: 'pointer', fontSize: 13, fontFamily: 'inherit', whiteSpace: 'nowrap' }}>＋ 新增尺寸</button>
+                  </div>
+                  {addingSize === kind && (
+                    <div style={{ display: 'flex', gap: 6, marginTop: 6 }}>
+                      <input autoFocus type="text" value={newSize} onChange={e => setNewSize(e.target.value)}
+                        onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); addSize(kind) } }}
+                        placeholder={kind === 'bag' ? '輸入新尺寸，例：35×45' : '輸入新尺寸，例：10×15'} aria-label={`新的${label}`}
+                        style={{ flex: 1, border: '1px solid #c4b5fd', background: '#fff', borderRadius: 8, padding: '6px 10px', fontFamily: 'inherit', fontSize: 14 }} />
+                      <button type="button" onClick={() => addSize(kind)} style={{ background: '#7c3aed', color: '#fff', border: 'none', borderRadius: 8, padding: '0 12px', fontWeight: 700, cursor: 'pointer', fontFamily: 'inherit' }}>加入</button>
+                      <button type="button" onClick={() => setAddingSize(null)} style={{ color: '#94a3b8', border: 'none', background: 'none', cursor: 'pointer', padding: '0 4px' }}>✕</button>
+                    </div>
+                  )}
+                </div>
+              )
+              return (
+                <div style={{ background: '#f5f3ff', borderRadius: 16, padding: 14, marginBottom: 12 }}>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: '#6d28d9', marginBottom: 10 }}>
+                    🛍 包材 <span style={{ fontWeight: 400, color: '#8b5cf6', fontSize: 12 }}>（倉管在「包材準備」依這裡備料勾選）</span>
+                  </div>
+                  <div style={{ fontSize: 12, color: '#7c3aed', marginBottom: 3 }}>內包裝</div>
+                  <div style={{ display: 'flex', gap: 6, marginBottom: 8 }}>
+                    <button type="button" onClick={() => setPack({ inner: pk.inner === '原包裝' ? '' : '原包裝' })} style={seg(pk.inner === '原包裝')} aria-pressed={pk.inner === '原包裝'}>原包裝（自家熱印）</button>
+                    <button type="button" onClick={() => setPack({ inner: pk.inner === '真空袋' ? '' : '真空袋' })} style={seg(pk.inner === '真空袋')} aria-pressed={pk.inner === '真空袋'}>真空袋</button>
+                  </div>
+                  {pk.inner === '真空袋' && sizeRow('bag', '真空袋尺寸', pk.bagSize, v => setPack({ bagSize: v }))}
+                  <label style={{ display: 'flex', alignItems: 'center', gap: 6, background: '#fff', padding: '7px 10px', borderRadius: 10, cursor: 'pointer', marginBottom: pk.sticker ? 8 : 0 }}>
+                    <input type="checkbox" checked={!!pk.sticker} style={{ width: 15, height: 15 }}
+                      onChange={e => setPack({ sticker: e.target.checked, stickerSize: e.target.checked && !pk.stickerSize ? (allSizes.sticker[0] || '') : pk.stickerSize })} />
+                    <span style={{ fontSize: 13, fontWeight: 700, color: '#b45309' }}>🏷 要貼紙（外銷成分貼、營業用標籤…）</span>
+                  </label>
+                  {pk.sticker && (
+                    <>
+                      {sizeRow('sticker', '貼紙尺寸', pk.stickerSize, v => setPack({ stickerSize: v }))}
+                      <div style={{ fontSize: 12, color: '#7c3aed', marginBottom: 3 }}>印製方式</div>
+                      <div style={{ display: 'flex', gap: 6, marginBottom: 8 }}>
+                        <button type="button" onClick={() => setPack({ stickerPrint: '送印' })} style={seg(pk.stickerPrint === '送印')} aria-pressed={pk.stickerPrint === '送印'}>送印（外面印刷廠）</button>
+                        <button type="button" onClick={() => setPack({ stickerPrint: '自印' })} style={seg(pk.stickerPrint === '自印')} aria-pressed={pk.stickerPrint === '自印'}>自印</button>
+                      </div>
+                      <input type="text" value={pk.stickerNote} onChange={e => setPack({ stickerNote: e.target.value })} placeholder="貼紙內容（例：英文成分貼、日文成分貼、營業用標籤）" aria-label="貼紙內容"
+                        style={{ width: '100%', background: '#fff', border: 'none', borderRadius: 10, padding: '8px 10px', fontFamily: 'inherit', fontSize: 13 }} />
+                    </>
+                  )}
+                </div>
+              )
+            })()}
 
             <div style={{ marginBottom: 12 }}>
               <div style={{ fontSize: 13, color: '#94a3b8', fontWeight: 700, marginBottom: 4 }}>口味品項規格 *</div>
