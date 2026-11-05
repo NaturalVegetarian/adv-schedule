@@ -1,12 +1,13 @@
 import { useState, useEffect, useMemo, useRef } from 'react'
 import { supabase } from '../lib/supabase'
-import { toIso, todayIso, addDays } from '../lib/flavors'
+import { toIso, todayIso, addDays, isoOf, parseIso, mdOf, wdOf } from '../lib/flavors'
 import { loadPage, savePageData } from '../lib/pageSave'
 
 // 訂單流程（資料庫狀態值不變，只改顯示名稱）：
-// 等待排程(生產排程科) → 包材準備(原物料倉庫管理科) → 完成備貨(包裝科) → 確認出貨(出貨交運科) → 完成出貨
-const STATES = ['pending', 'packaging', 'scheduled', 'prepared', 'shipped']
+// 預排客訂(客戶服務科) → 等待排程(生產排程科) → 包材準備(原物料倉庫管理科) → 完成備貨(包裝科) → 確認出貨(出貨交運科) → 完成出貨
+const STATES = ['preorder', 'pending', 'packaging', 'scheduled', 'prepared', 'shipped']
 const STAGE = {
+  preorder:  { tab: '預排客訂', dept: '客戶服務科',       action: '確認訂單', dateLabel: '確認出貨日（必填）', note: '客戶已確認品項、數量與出貨日，轉給生產排程科排程。' },
   pending:   { tab: '等待排程', dept: '生產排程科',       action: '排入行程', dateLabel: '排程生產日' },
   packaging: { tab: '包材準備', dept: '原物料倉庫管理科', action: '包材備妥', note: '確認外箱、麥頭等包材已備妥，交給包裝科備貨。' },
   scheduled: { tab: '完成備貨', dept: '包裝科',           action: '完成備貨', dateLabel: '完成備貨日期' },
@@ -16,6 +17,8 @@ const STAGE = {
 // 異常狀態（生產部）：不是流程中的一關，而是系統自動整理「出貨有問題」的客訂，給生產部長做異常通知
 const ANOMALY = 'anomaly'
 const SOON_DAYS = 2 // 幾天內要出貨、卻還沒完成備貨，算「即將到期」
+const ACTIVE = ['pending', 'packaging', 'scheduled', 'prepared'] // 已確認、還沒出貨（生產部要處理的）
+const LOST = 'cancelled' // 預排客訂沒成交
 const STATUS_LABEL = Object.fromEntries(STATES.map(s => [s, STAGE[s].tab]))
 const NEXT_ACTION = Object.fromEntries(STATES.filter(s => STAGE[s].action).map(s => [s, STAGE[s].action]))
 
@@ -32,8 +35,12 @@ const stickerSizeTxt = s => withUnit(s, 'mm')
 const innerTxt = pk => (pk.inner === '真空袋' ? `${INNER_LABEL.真空袋} ${bagSizeTxt(pk.bagSize)}` : INNER_LABEL[pk.inner] || pk.inner)
 const stickerTxt = pk => [stickerSizeTxt(pk.stickerSize), pk.stickerPrint, pk.stickerNote].filter(Boolean).join('·')
 const PACK_SQL = "alter table adv_orders add column if not exists pack jsonb default '{}'::jsonb;"
-const PACK_SQL_MSG = `「包材」欄位還沒建立，包材資料沒存到。\n請到 Supabase 的 SQL Editor 貼上這一行按 Run（只要做一次）：\n\n${PACK_SQL}`
-const isPackColErr = e => /pack/i.test(e?.message || '') && /column|schema/i.test(e?.message || '')
+const CS_SQL = "alter table adv_orders add column if not exists cs jsonb default '{}'::jsonb;"
+// 資料庫還沒建立的 jsonb 欄位：先存其他資料，再提醒執行 SQL
+const COL_SQL = { pack: PACK_SQL, cs: CS_SQL }
+const COL_NAME = { pack: '「包材」', cs: '「客服追蹤」' }
+const missingCol = e => (String(e?.message || '').match(/'(\w+)' column/) || [])[1] || ''
+const colMsg = cols => `${cols.map(c => COL_NAME[c]).join('、')}欄位還沒建立，這部分資料沒存到。\n請到 Supabase 的 SQL Editor 貼上下面${cols.length > 1 ? '這幾行' : '這一行'}按 Run（只要做一次）：\n\n${cols.map(c => COL_SQL[c]).join('\n')}`
 // 尺寸統一寫法：拿掉空白和單位，乘號統一（15cm*25cm → 15×25）
 const normSize = s => String(s || '').trim().replace(/\s+/g, '').replace(/(cm|mm|公分|毫米|厘米)/gi, '').replace(/[*xX＊✕]/g, '×')
 const uniq = a => [...new Set(a.filter(Boolean))]
@@ -66,7 +73,73 @@ function packItems(o, boxes) {
 // 出貨日統一成 YYYY-MM-DD（舊資料可能是 2026/11/4 或 11/4）
 export const shipDateOf = o => toIso(o.target_date || o.targetDate)
 
+// ── 預排客訂：客服追蹤（存在 adv_orders.cs，jsonb）──
+// cs = { receivedAt 接單時間, owner 負責人, next 下次追蹤日, logs: [{ at, by, note, next, kind }],
+//        confirmedAt/confirmedBy 確認訂單, lostAt/lostBy/lostReason 未成交 }
+const LOST_REASONS = ['價格', '交期', '數量', '客戶取消', '其他']
+const SHIP_WARN_DAYS = 3 // 出貨日幾天內還沒確認要警示
+const dayDiff = (a, b) => Math.round((parseIso(b) - parseIso(a)) / 86400000) // b − a（天）
+const localDay = iso => (iso ? isoOf(new Date(iso)) : '')
+// 一張預排單的追蹤狀況：overdue 追蹤逾期／today 今天要追蹤／later 之後再追／none 還沒排追蹤日
+function csState(o, today) {
+  const cs = o.cs || {}
+  const next = cs.next || ''
+  const td = shipDateOf(o)
+  const st = !next ? 'none' : next < today ? 'overdue' : next === today ? 'today' : 'later'
+  return {
+    st, next, td, logs: cs.logs || [], owner: cs.owner || '',
+    received: localDay(cs.receivedAt || o.created_at),
+    overdueDays: next && next < today ? dayDiff(next, today) : 0,
+    shipSoon: !!td && td <= addDays(today, SHIP_WARN_DAYS),
+  }
+}
+const CS_RANK = { overdue: 0, today: 1, none: 2, later: 3 }
+const needsAttention = s => s.st !== 'later' || s.shipSoon // 逾期、今天要追、沒排追蹤日、出貨日快到
+
+// 客服成效（本月）：確認件數、平均確認天數、確認率、準時追蹤率，以及每個人的表現
+function csStats(orders, today) {
+  const ym = today.slice(0, 7)
+  const inMonth = iso => localDay(iso).slice(0, 7) === ym
+  const open = orders.filter(o => o.status === 'preorder').map(o => ({ o, s: csState(o, today) }))
+  const people = {}
+  const P = n => (people[n || '未填'] = people[n || '未填'] || { name: n || '未填', open: 0, logs: 0, onTime: 0, due: 0, confirmed: 0, lost: 0 })
+  open.forEach(({ s }) => { const p = P(s.owner); p.open++; if (s.st === 'overdue') p.due++ }) // 逾期未追蹤也算一次該追蹤
+  let logs = 0, onTime = 0, due = open.filter(x => x.s.st === 'overdue').length
+  const lead = []
+  let confirmed = 0, lost = 0
+  orders.forEach(o => {
+    const cs = o.cs || {}
+    const L = cs.logs || []
+    L.forEach((l, i) => {
+      if (l.kind === 'new' || !inMonth(l.at)) return
+      const planned = i > 0 ? L[i - 1].next : ''
+      const p = P(l.by)
+      logs++; p.logs++
+      if (planned) { due++; p.due++; if (localDay(l.at) <= planned) { onTime++; p.onTime++ } }
+    })
+    if (cs.confirmedAt && inMonth(cs.confirmedAt)) {
+      confirmed++; P(cs.owner || cs.confirmedBy).confirmed++ // 成果算在負責人身上
+      const d = (new Date(cs.confirmedAt) - new Date(cs.receivedAt || o.created_at)) / 86400000
+      if (d >= 0) lead.push(d)
+    }
+    if (o.status === LOST && cs.lostAt && inMonth(cs.lostAt)) { lost++; P(cs.owner || cs.lostBy).lost++ }
+  })
+  return {
+    ym, open: open.length,
+    overdue: open.filter(x => x.s.st === 'overdue').length,
+    today: open.filter(x => x.s.st === 'today').length,
+    noNext: open.filter(x => x.s.st === 'none').length,
+    shipSoon: open.filter(x => x.s.shipSoon).length,
+    attention: open.filter(x => needsAttention(x.s)).length,
+    confirmed, lost, logs, onTime, due,
+    avgLead: lead.length ? lead.reduce((a, b) => a + b, 0) / lead.length : null,
+    people: Object.values(people).filter(p => p.open || p.logs || p.confirmed || p.lost).sort((a, b) => (b.confirmed + b.logs) - (a.confirmed + a.logs)),
+  }
+}
+const pct = (a, b) => (b > 0 ? `${Math.round((a / b) * 100)}%` : '—')
+
 // 異常規則（生產排程頁上方的提示也用這個，兩邊數字才會一致）：
+//   只看已確認、還沒出貨的客訂（預排客訂、未成交不算）
 //   逾期未出貨＝出貨日已過、還沒完成出貨
 //   即將到期＝SOON_DAYS 天內要出貨，但還在等待排程／包材準備／完成備貨（還沒備好貨）
 //   未填出貨日＝沒有出貨日
@@ -74,7 +147,7 @@ export function orderAnomalies(orders, today = todayIso()) {
   const soon = addDays(today, SOON_DAYS)
   const res = { late: [], soon: [], noDate: [] }
   orders.forEach(o => {
-    if (o.status === 'shipped') return
+    if (!ACTIVE.includes(o.status)) return
     const td = shipDateOf(o)
     if (!td) res.noDate.push(o)
     else if (td < today) res.late.push(o)
@@ -91,7 +164,19 @@ export default function OrdersPage({ user }) {
   const [loading, setLoading] = useState(true)
   const [savedItems, setSavedItems] = useState(['黃金滿福餃(營業用)', '泡菜滿福餃(營業用)', '素花滿福餃(營業用)', '新鮮蔬滿福餃(營業用)', '剝皮辣椒滿福餃(營業用)', '酸白菜滿福餃(營業用)', '自然齋香羹(營業用)', '黃金滿福餃散裝'])
   const [editingConfigs, setEditingConfigs] = useState([])
-  const [activeTab, setActiveTab] = useState('pending')
+  const TAB_KEYS = [...STATES, ANOMALY]
+  const [activeTab, setActiveTabRaw] = useState(() => {
+    try { const t = localStorage.getItem('op-tab'); return TAB_KEYS.includes(t) ? t : 'pending' } catch { return 'pending' }
+  })
+  const setActiveTab = t => { setActiveTabRaw(t); try { localStorage.setItem('op-tab', t) } catch { /* 無痕模式等 */ } }
+  const me = user?.profile?.name || user?.profile?.email || '未登入' // 追蹤紀錄記錄是誰
+  const [csDraft, setCsDraft] = useState({ next: '', note: '' }) // 新增訂單：下次追蹤日、接單備註
+  const [logFor, setLogFor] = useState(null) // 正在記追蹤的訂單 id
+  const [logDraft, setLogDraft] = useState({ note: '', next: '' })
+  const [histOpen, setHistOpen] = useState({}) // 展開追蹤紀錄
+  const [lostModal, setLostModal] = useState(null) // 未成交視窗 { order, reason, note }
+  const [showLost, setShowLost] = useState(false)
+  const [statusErr, setStatusErr] = useState('')
   const [isFormOpen, setIsFormOpen] = useState(false)
   const [isSettingsOpen, setIsSettingsOpen] = useState(false)
   const [isConfirmOpen, setIsConfirmOpen] = useState(false)
@@ -220,8 +305,53 @@ export default function OrdersPage({ user }) {
     else checks[it.key] = { at: new Date().toISOString(), v: it.v }
     const pack = { ...pk, checks }
     setOrders(list => list.map(x => (x.id === o.id ? { ...x, pack } : x)))
-    const { error } = await supabase.from('adv_orders').update({ pack, updated_at: new Date().toISOString() }).eq('id', o.id)
-    if (error) { alert(isPackColErr(error) ? '勾選沒存到：' + PACK_SQL_MSG : '勾選沒存到：' + error.message); fetchOrders() }
+    const { error, missing } = await updateOrder(o.id, { pack, updated_at: new Date().toISOString() }, '勾選沒存到：')
+    if (error || missing.length) { if (error) alert('勾選沒存到：' + error.message); fetchOrders() }
+  }
+
+  // 更新訂單；資料庫還沒有 pack／cs 欄位時，先存其他欄位再提醒執行 SQL
+  const updateOrder = async (id, data, prefix = '') => {
+    const d = { ...data }, missing = []
+    let { error } = await supabase.from('adv_orders').update(d).eq('id', id)
+    while (error && COL_SQL[missingCol(error)] && !missing.includes(missingCol(error))) {
+      const col = missingCol(error)
+      missing.push(col); delete d[col]
+      ;({ error } = await supabase.from('adv_orders').update(d).eq('id', id))
+    }
+    if (missing.length) alert(prefix + colMsg(missing))
+    return { error, missing }
+  }
+
+  // ── 預排客訂：記一筆追蹤／確認／未成交 ──
+  const openLog = o => { setLogFor(logFor === o.id ? null : o.id); setLogDraft({ note: '', next: addDays(todayIso(), 2) }) }
+  const saveLog = async o => {
+    const note = logDraft.note.trim()
+    if (!note) { showToast('請寫這次聯絡的結果'); return }
+    const now = new Date().toISOString()
+    const prev = o.cs || {}
+    const cs = { ...prev, receivedAt: prev.receivedAt || o.created_at, owner: prev.owner || me, next: logDraft.next || '', logs: [...(prev.logs || []), { at: now, by: me, note, next: logDraft.next || '' }] }
+    setOrders(list => list.map(x => (x.id === o.id ? { ...x, cs } : x)))
+    setLogFor(null)
+    const { error, missing } = await updateOrder(o.id, { cs, updated_at: now }, '追蹤紀錄沒存到：')
+    if (error) { alert('追蹤紀錄沒存到：' + error.message); fetchOrders() }
+    else if (!missing.length) showToast('已記錄追蹤 ✅')
+    else fetchOrders()
+  }
+  const confirmLost = async () => {
+    const { order: o, reason, note } = lostModal
+    if (!reason) { showToast('請選未成交原因'); return }
+    const now = new Date().toISOString()
+    const cs = { ...(o.cs || {}), receivedAt: o.cs?.receivedAt || o.created_at, lostAt: now, lostBy: me, lostReason: note.trim() ? `${reason}：${note.trim()}` : reason }
+    const { error } = await updateOrder(o.id, { status: LOST, cs, updated_at: now }, '未成交原因沒存到：')
+    if (error) { alert('更新失敗：' + error.message); return }
+    setLostModal(null); fetchOrders(); showToast('已標記未成交')
+  }
+  const restoreLost = async o => {
+    const cs = { ...(o.cs || {}) }
+    delete cs.lostAt; delete cs.lostBy; delete cs.lostReason
+    const { error } = await updateOrder(o.id, { status: 'preorder', cs, updated_at: new Date().toISOString() })
+    if (error) { alert('更新失敗：' + error.message); return }
+    fetchOrders(); showToast('已恢復成預排客訂')
   }
 
   const calcedQty = useMemo(() => {
@@ -230,12 +360,14 @@ export default function OrdersPage({ user }) {
     return b * q
   }, [boxCountInput, boxQtyInput])
 
+  const formIsPre = !editingOrderId || orders.find(o => o.id === editingOrderId)?.status === 'preorder' // 新單或預排中的單
   const handleFormSubmit = e => {
     e.preventDefault()
     setFormError('')
     if (!formData.customer_name.trim()) { setFormError('請填寫客戶名稱'); return }
     if (!formData.item_name) { setFormError('請選擇口味品項'); return }
-    if (!formData.target_date) { setFormError('請選擇指定出貨日'); return }
+    const isPre = formIsPre // 預排的出貨日可以先空著
+    if (!isPre && !formData.target_date) { setFormError('請選擇指定出貨日'); return }
     const pk = { ...EMPTY_PACK, ...(formData.pack || {}) }
     if (pk.inner === '真空袋' && !pk.bagSize) { setFormError('請選空白真空袋尺寸（沒有的話按「＋ 新增／刪除尺寸」）'); return }
     if (pk.sticker && !pk.stickerSize) { setFormError('請選貼紙尺寸'); return }
@@ -273,23 +405,28 @@ export default function OrdersPage({ user }) {
     const id = editingOrderId || `order_${Date.now()}`
     const existingOrder = orders.find(o => o.id === editingOrderId)
     try {
+      const now = new Date().toISOString()
       const row = {
         id, ...pendingOrderData,
-        status: existingOrder?.status || 'pending',
-        created_at: existingOrder?.created_at || new Date().toISOString(),
+        status: existingOrder?.status || 'preorder', // 新接的單先放「預排客訂」，客服確認後才到等待排程
+        created_at: existingOrder?.created_at || now,
         created_by: user?.session?.user?.id,
-        updated_at: new Date().toISOString()
+        updated_at: now
+      }
+      if (!existingOrder) {
+        const note = csDraft.note.trim()
+        row.cs = { receivedAt: now, owner: me, next: csDraft.next || '', logs: [{ at: now, by: me, note: `接單${note ? `：${note}` : ''}`, next: csDraft.next || '', kind: 'new' }] }
       }
       let { error } = await supabase.from('adv_orders').upsert(row)
-      let packMissing = false
-      if (error && isPackColErr(error)) { // 資料庫還沒有 pack 欄位：先存訂單本身，再提醒執行 SQL
-        const { pack, ...rest } = row
-        ;({ error } = await supabase.from('adv_orders').upsert(rest))
-        packMissing = !error
+      const missing = []
+      while (error && COL_SQL[missingCol(error)] && !missing.includes(missingCol(error))) { // 資料庫還沒有 pack／cs 欄位
+        const col = missingCol(error)
+        missing.push(col); delete row[col]
+        ;({ error } = await supabase.from('adv_orders').upsert(row))
       }
       if (error) throw error
-      if (packMissing) alert('訂單已存，但' + PACK_SQL_MSG)
-      showToast(editingOrderId ? '訂單修改成功 ✅' : '訂單已儲存 ✅')
+      if (missing.length) alert('訂單已存，但' + colMsg(missing))
+      showToast(editingOrderId ? '訂單修改成功 ✅' : '訂單已放進「預排客訂」✅')
       fetchOrders()
       if (formData.is_mixed_box && submitActionRef.current === 'continue' && !editingOrderId) {
         setFormData(p => ({ ...p, item_name: '', quantity: '', notes: '', pack: { ...EMPTY_PACK, ...(p.pack || {}), checks: {} } }))
@@ -303,7 +440,12 @@ export default function OrdersPage({ user }) {
     const idx = STATES.indexOf(order.status)
     const next = Math.max(0, Math.min(STATES.length - 1, idx + direction))
     if (next === idx) return
-    const { error } = await supabase.from('adv_orders').update({ status: STATES[next], updated_at: new Date().toISOString() }).eq('id', order.id)
+    const data = { status: STATES[next], updated_at: new Date().toISOString() }
+    if (STATES[next] === 'preorder') { // 退回預排：拿掉確認紀錄，明天再追蹤
+      const { confirmedAt, confirmedBy, ...cs } = order.cs || {}
+      data.cs = { ...cs, receivedAt: cs.receivedAt || order.created_at, next: addDays(todayIso(), 1) }
+    }
+    const { error } = await updateOrder(order.id, data, '狀態已更新，但')
     if (error) { alert('狀態更新失敗：' + error.message); return }
     fetchOrders()
     showToast(`已退回：${STATUS_LABEL[STATES[next]]} ✅`)
@@ -377,11 +519,22 @@ export default function OrdersPage({ user }) {
 
   // 搜尋口味或客戶；在完成出貨分頁有輸入搜尋時，查全部月份
   const kw = filterFlavor.trim()
+  const todayStr = todayIso()
+  const csRankOf = o => { const st = csState(o, todayStr); return [st.shipSoon ? 0 : 1, CS_RANK[st.st], st.next || '9999'] }
   const filteredOrders = sortedOrders
     .filter(o => o.status === activeTab)
     .filter(o => !kw || (o.item_name || o.itemName || '').includes(kw) || (o.customer_name || o.customerName || '').includes(kw))
     .filter(o => activeTab !== 'shipped' || kw || monthOf(o) === curShipMonth)
-    .sort((a, b) => activeTab === 'shipped' ? String(b.target_date || '').localeCompare(String(a.target_date || '')) : 0)
+    .sort((a, b) => {
+      if (activeTab === 'shipped') return String(b.target_date || '').localeCompare(String(a.target_date || ''))
+      if (activeTab === 'preorder') { // 預排客訂：最急的在前（出貨日快到 → 追蹤逾期 → 今天要追 → 沒排 → 之後）
+        const x = csRankOf(a), y = csRankOf(b)
+        return x[0] - y[0] || x[1] - y[1] || x[2].localeCompare(y[2])
+      }
+      return 0
+    })
+  const cst = useMemo(() => csStats(orders, todayStr), [orders, todayStr])
+  const lostOrders = useMemo(() => orders.filter(o => o.status === LOST).sort((a, b) => String(b.cs?.lostAt || '').localeCompare(String(a.cs?.lostAt || ''))), [orders])
   const groupedByCustomer = filteredOrders.reduce((acc, o) => {
     const fullName = o.customer_name || o.customerName || '未知客戶'
     const parentKey = fullName.includes('-') ? fullName.split('-')[0] : fullName
@@ -397,14 +550,14 @@ export default function OrdersPage({ user }) {
   const daysBetween = (a, b) => Math.round((new Date(b) - new Date(a)) / 86400000)
 
   // ── 異常狀態：逾期未出貨／即將到期還沒備貨／未填出貨日（已完成出貨的不算） ──
-  const todayStr = todayIso()
   const anomalies = useMemo(() => orderAnomalies(orders, todayStr), [orders, todayStr])
 
   // 推進到下一關（各分頁卡片與異常狀態共用）
   const openNext = o => {
+    setStatusErr('')
     const idx = STATES.indexOf(o.status)
     if (idx < 0 || o.status === 'shipped') return
-    setStatusDate(formatDate(new Date()))
+    setStatusDate(o.status === 'preorder' ? shipDateOf(o) : formatDate(new Date())) // 確認訂單：帶入預計出貨日
     setStatusModal({ order: o, nextStatus: STATES[idx + 1], label: NEXT_ACTION[o.status] })
   }
 
@@ -415,6 +568,7 @@ export default function OrdersPage({ user }) {
     prepared:  { bg: '#eff6ff', header: '#3b82f6', accent: '#1e3a8a', border: '#bfdbfe' },
     shipped:   { bg: '#f8fafc', header: '#64748b', accent: '#1e293b', border: '#e2e8f0' },
     anomaly:   { bg: '#fff1f2', header: '#e11d48', accent: '#881337', border: '#fecdd3' },
+    preorder:  { bg: '#ecfeff', header: '#0e7490', accent: '#164e63', border: '#a5f3fc' },
   }
   const th = THEME[activeTab] || THEME.pending
   // 推進狀態的視窗用「該筆訂單所在關卡」的顏色（從異常狀態按也一樣）
@@ -427,6 +581,163 @@ export default function OrdersPage({ user }) {
   })() : null
 
   // 異常狀態分頁內容（用函式呼叫，不寫成元件，避免重建）
+  // ── 預排客訂（客戶服務科）──
+  // 每張單的客服追蹤框：接單日、負責人、下次追蹤（逾期／今天）、最近紀錄、記一筆追蹤、全部紀錄
+  const renderCsBox = o => {
+    const s = csState(o, todayStr)
+    const last = s.logs[s.logs.length - 1]
+    const ago = s.received ? dayDiff(s.received, todayStr) : null
+    const pill = {
+      overdue: { t: `⚠ 追蹤逾期 ${s.overdueDays} 天（原定 ${mdOf(s.next)}）`, bg: '#fee2e2', c: '#b91c1c' },
+      today:   { t: '🔔 今天要追蹤', bg: '#ffedd5', c: '#c2410c' },
+      later:   { t: `下次追蹤 ${mdOf(s.next)}（${wdOf(s.next).slice(1)}）`, bg: '#cffafe', c: '#0e7490' },
+      none:    { t: '還沒排下次追蹤日', bg: '#f1f5f9', c: '#64748b' },
+    }[s.st]
+    const shipLeft = s.td ? dayDiff(todayStr, s.td) : null
+    const open = logFor === o.id
+    const hist = !!histOpen[o.id]
+    const nextMon = addDays(todayStr, ((8 - parseIso(todayStr).getDay()) % 7) || 7)
+    const chip = (label, iso) => (
+      <button type="button" key={label} onClick={() => setLogDraft(d => ({ ...d, next: iso }))}
+        style={{ border: `1px solid ${logDraft.next === iso ? '#0e7490' : '#a5f3fc'}`, background: logDraft.next === iso ? '#0e7490' : '#fff', color: logDraft.next === iso ? '#fff' : '#0e7490', borderRadius: 14, padding: '2px 9px', fontSize: 12, fontWeight: 700, cursor: 'pointer', fontFamily: 'inherit' }}>{label}</button>
+    )
+    return (
+      <div style={{ background: '#ecfeff', border: '1px solid #a5f3fc', borderRadius: 12, padding: '8px 10px', marginBottom: 8 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+          <span style={{ fontSize: 13, fontWeight: 800, color: '#0e7490' }}>
+            📞 客服追蹤
+            <span style={{ fontWeight: 500, color: '#64748b', marginLeft: 6 }}>
+              接單 {mdOf(s.received)}{ago != null ? `（${ago <= 0 ? '今天' : `${ago} 天前`}）` : ''}{s.owner ? ` · 負責 ${s.owner}` : ''}
+            </span>
+          </span>
+          <span style={{ fontSize: 12, fontWeight: 800, background: pill.bg, color: pill.c, borderRadius: 20, padding: '2px 9px' }}>{pill.t}</span>
+        </div>
+        {s.shipSoon && (
+          <div style={{ marginTop: 4, fontSize: 13, fontWeight: 800, color: '#be123c' }}>
+            ⚠ 預計出貨日 {mdOf(s.td)}{shipLeft < 0 ? ` 已過 ${-shipLeft} 天` : shipLeft === 0 ? ' 就是今天' : ` 只剩 ${shipLeft} 天`}，還沒確認訂單
+          </div>
+        )}
+        <div style={{ marginTop: 4, fontSize: 13, color: '#334155' }}>
+          {last ? <>最近：<span style={{ color: '#64748b' }}>{fmtMDHM(last.at)} {last.by}</span>　{last.note}</> : '還沒有追蹤紀錄'}
+        </div>
+        <div style={{ display: 'flex', gap: 6, marginTop: 6, flexWrap: 'wrap' }}>
+          <button onClick={() => openLog(o)} style={{ background: open ? '#0e7490' : '#fff', color: open ? '#fff' : '#0e7490', border: '1px solid #67e8f9', borderRadius: 8, padding: '4px 10px', fontSize: 13, fontWeight: 800, cursor: 'pointer', fontFamily: 'inherit' }}>＋ 記一筆追蹤</button>
+          {s.logs.length > 0 && (
+            <button onClick={() => setHistOpen(h => ({ ...h, [o.id]: !h[o.id] }))} style={{ background: 'none', color: '#0e7490', border: 'none', fontSize: 13, fontWeight: 700, cursor: 'pointer', fontFamily: 'inherit' }}>
+              紀錄（{s.logs.length}）{hist ? '▲' : '▼'}
+            </button>
+          )}
+        </div>
+        {open && (
+          <div style={{ marginTop: 8, background: '#fff', border: '1px solid #a5f3fc', borderRadius: 10, padding: 8 }}>
+            <textarea value={logDraft.note} onChange={e => setLogDraft(d => ({ ...d, note: e.target.value }))} rows={2} autoFocus aria-label="追蹤內容"
+              placeholder="這次聯絡的結果（例：已報價，等客戶回覆；客戶要改 11/30 出貨）"
+              style={{ width: '100%', border: '1px solid #cffafe', borderRadius: 8, padding: '6px 8px', fontFamily: 'inherit', fontSize: 14, resize: 'vertical' }} />
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', marginTop: 6, fontSize: 13, color: '#164e63' }}>
+              下次追蹤：
+              <input type="date" value={logDraft.next} onChange={e => setLogDraft(d => ({ ...d, next: e.target.value }))} aria-label="下次追蹤日"
+                style={{ border: '1px solid #a5f3fc', borderRadius: 8, padding: '3px 6px', fontFamily: 'inherit', fontSize: 13 }} />
+              {chip('明天', addDays(todayStr, 1))}{chip('後天', addDays(todayStr, 2))}{chip('3 天後', addDays(todayStr, 3))}{chip('下週一', nextMon)}
+            </div>
+            <div style={{ display: 'flex', gap: 6, marginTop: 8 }}>
+              <button onClick={() => saveLog(o)} style={{ flex: 1, background: '#0e7490', color: '#fff', border: 'none', borderRadius: 8, padding: '7px 0', fontWeight: 800, cursor: 'pointer', fontFamily: 'inherit' }}>存追蹤紀錄</button>
+              <button onClick={() => setLogFor(null)} style={{ background: '#f1f5f9', color: '#64748b', border: 'none', borderRadius: 8, padding: '7px 12px', fontWeight: 700, cursor: 'pointer', fontFamily: 'inherit' }}>取消</button>
+            </div>
+          </div>
+        )}
+        {hist && (
+          <div style={{ marginTop: 8, borderTop: '1px dashed #a5f3fc', paddingTop: 6 }}>
+            {s.logs.map((l, i) => ({ l, i })).reverse().map(({ l, i }) => {
+              const planned = i > 0 ? s.logs[i - 1].next : ''
+              const late = planned && l.kind !== 'new' ? dayDiff(planned, localDay(l.at)) : null
+              return (
+                <div key={i} style={{ fontSize: 12, color: '#334155', padding: '3px 0', lineHeight: 1.5 }}>
+                  <span style={{ color: '#64748b' }}>{fmtMDHM(l.at)} {l.by}</span>　{l.note}
+                  {late != null && <span style={{ marginLeft: 6, fontWeight: 700, color: late > 0 ? '#b91c1c' : '#047857' }}>{late > 0 ? `晚 ${late} 天` : '準時'}</span>}
+                  {l.next && <span style={{ color: '#0e7490' }}>　→ 下次 {mdOf(l.next)}</span>}
+                </div>
+              )
+            })}
+          </div>
+        )}
+      </div>
+    )
+  }
+
+  // 預排客訂分頁上方：今日提醒＋本月成效（給客戶服務科與主管看）
+  const renderCsPanel = () => {
+    const c = cst
+    const month = `${Number(c.ym.slice(5))} 月`
+    const tile = (label, value, sub, color) => (
+      <div style={{ background: '#fff', border: '1px solid #cffafe', borderRadius: 12, padding: '8px 10px' }}>
+        <div style={{ fontSize: 12, color: '#64748b' }}>{label}</div>
+        <div style={{ fontSize: 22, fontWeight: 900, color: color || '#164e63', lineHeight: 1.25 }}>{value}</div>
+        {sub && <div style={{ fontSize: 11, color: '#94a3b8' }}>{sub}</div>}
+      </div>
+    )
+    const th2 = { padding: '6px 8px', fontWeight: 800 }
+    return (
+      <div className="cs-panel" style={{ background: '#ecfeff', border: '1px solid #a5f3fc', borderRadius: 16, padding: 12, marginBottom: 14 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', flexWrap: 'wrap', gap: 6, marginBottom: 8 }}>
+          <strong style={{ color: '#0e7490', fontSize: 15 }}>👩‍💼 客戶服務科：今日提醒與{month}成效</strong>
+          <span style={{ fontSize: 12, color: '#64748b' }}>新接的單先放這裡，追蹤到客戶確認後按「確認訂單」轉給生產排程科</span>
+        </div>
+        <div className="cs-tiles">
+          {tile('待確認', `${c.open} 件`, c.shipSoon ? `${c.shipSoon} 件出貨日 ${SHIP_WARN_DAYS} 天內` : '', c.shipSoon ? '#be123c' : undefined)}
+          {tile('今天要追蹤', `${c.today} 件`, c.noNext ? `另有 ${c.noNext} 件沒排追蹤日` : '', c.today ? '#c2410c' : undefined)}
+          {tile('追蹤逾期', `${c.overdue} 件`, '過了追蹤日還沒記錄', c.overdue ? '#b91c1c' : undefined)}
+          {tile(`${month}確認`, `${c.confirmed} 件`, `未成交 ${c.lost} 件 · 確認率 ${pct(c.confirmed, c.confirmed + c.lost)}`, '#047857')}
+          {tile('平均確認天數', c.avgLead == null ? '—' : `${c.avgLead.toFixed(1)} 天`, '接單 → 確認訂單')}
+          {tile('準時追蹤率', pct(c.onTime, c.due), `${c.onTime}/${c.due} 次在排定日當天或之前`)}
+        </div>
+        {c.people.length > 0 && (
+          <div style={{ marginTop: 10, overflowX: 'auto' }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13, background: '#fff', borderRadius: 10, minWidth: 420 }}>
+              <thead><tr style={{ color: '#0e7490', textAlign: 'right' }}>
+                <th style={{ ...th2, textAlign: 'left' }}>人員（{month}）</th><th style={th2}>負責中</th><th style={th2}>追蹤次數</th><th style={th2}>準時追蹤</th><th style={th2}>確認</th><th style={th2}>未成交</th>
+              </tr></thead>
+              <tbody>{c.people.map(p => (
+                <tr key={p.name} style={{ borderTop: '1px solid #ecfeff', textAlign: 'right' }}>
+                  <td style={{ textAlign: 'left', padding: '6px 8px', fontWeight: 700 }}>{p.name}</td>
+                  <td style={{ padding: '6px 8px' }}>{p.open}</td>
+                  <td style={{ padding: '6px 8px' }}>{p.logs}</td>
+                  <td style={{ padding: '6px 8px' }}>{pct(p.onTime, p.due)}</td>
+                  <td style={{ padding: '6px 8px', color: '#047857', fontWeight: 700 }}>{p.confirmed}</td>
+                  <td style={{ padding: '6px 8px', color: '#64748b' }}>{p.lost}</td>
+                </tr>
+              ))}</tbody>
+            </table>
+          </div>
+        )}
+        <div style={{ fontSize: 11, color: '#64748b', marginTop: 6, lineHeight: 1.6 }}>
+          準時追蹤＝在上次排定的追蹤日當天或之前記一筆追蹤（逾期還沒追的也算一次沒準時）；確認率＝確認 ÷（確認＋未成交）。
+        </div>
+      </div>
+    )
+  }
+
+  // 預排客訂分頁下方：未成交紀錄（可恢復）
+  const renderLostList = () => lostOrders.length > 0 && (
+    <div style={{ marginTop: 6 }}>
+      <button onClick={() => setShowLost(v => !v)} style={{ background: 'none', border: 'none', color: '#64748b', fontWeight: 700, fontSize: 13, cursor: 'pointer', fontFamily: 'inherit' }}>
+        未成交紀錄（{lostOrders.length}）{showLost ? '▲' : '▼'}
+      </button>
+      {showLost && (
+        <div style={{ background: '#fff', border: '1px solid #e2e8f0', borderRadius: 12, marginTop: 6 }}>
+          {lostOrders.map(o => (
+            <div key={o.id} style={{ display: 'flex', justifyContent: 'space-between', gap: 8, alignItems: 'center', padding: '8px 12px', borderTop: '1px solid #f1f5f9', flexWrap: 'wrap', fontSize: 13 }}>
+              <div style={{ minWidth: 0 }}>
+                <strong>{o.customer_name || o.customerName}</strong>　{o.item_name || o.itemName} · {o.quantity} 袋
+                <div style={{ color: '#64748b', fontSize: 12 }}>{fmtMDHM(o.cs?.lostAt)} {o.cs?.lostBy || ''}　原因：{o.cs?.lostReason || '—'}</div>
+              </div>
+              <button onClick={() => restoreLost(o)} style={{ background: '#fff', border: '1px solid #a5f3fc', color: '#0e7490', borderRadius: 8, padding: '4px 10px', fontSize: 12, fontWeight: 700, cursor: 'pointer', fontFamily: 'inherit' }}>恢復成預排</button>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+
   const renderAnomaly = () => {
     const match = o => !kw || (o.item_name || o.itemName || '').includes(kw) || (o.customer_name || o.customerName || '').includes(kw)
     const sections = [
@@ -500,26 +811,31 @@ export default function OrdersPage({ user }) {
         <h2 style={{ fontSize: 16, fontWeight: 900 }}>🥟 客訂管理系統</h2>
         <div style={{ display: 'flex', gap: 8 }}>
           <button onClick={() => { setEditingConfigs([...savedItems]); setIsSettingsOpen(true) }} style={{ background: 'rgba(255,255,255,.2)', border: 'none', borderRadius: '50%', width: 34, height: 34, cursor: 'pointer', fontSize: 16 }}>⚙️</button>
-          <button onClick={() => { closeForm(); setIsFormOpen(true) }} style={{ background: '#fff', color: '#1e293b', border: 'none', padding: '6px 14px', borderRadius: 20, fontWeight: 700, fontSize: 15, cursor: 'pointer' }}>新增客訂</button>
+          <button onClick={() => { closeForm(); setCsDraft({ next: addDays(todayIso(), 1), note: '' }); setIsFormOpen(true) }} style={{ background: '#fff', color: '#1e293b', border: 'none', padding: '6px 14px', borderRadius: 20, fontWeight: 700, fontSize: 15, cursor: 'pointer' }}>新增客訂</button>
         </div>
       </div>
 
       {/* 版面：手機 分頁3+2、卡片1欄；電腦 分頁1列、卡片2欄 */}
       <style>{`
         .op-wrap { max-width: 1200px; margin: 0 auto; padding: 12px 16px; }
-        .op-tabs { display: grid; grid-template-columns: repeat(3, 1fr); }
+        .op-tabs { display: grid; grid-template-columns: repeat(4, 1fr); }
         .op-cards { column-gap: 16px; }
-        @media (min-width: 760px) { .op-tabs { grid-template-columns: repeat(6, 1fr); } }
+        @media (min-width: 760px) { .op-tabs { grid-template-columns: repeat(7, 1fr); } }
         @media (min-width: 900px) { .op-cards { columns: 2; } }
+        .cs-tiles { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; }
+        @media (min-width: 760px) { .cs-tiles { grid-template-columns: repeat(6, 1fr); } }
       `}</style>
       <div className="op-wrap">
         <div className="op-tabs" style={{ background: 'rgba(255,255,255,.5)', borderRadius: 16, padding: 4, marginBottom: 12, gap: 4 }}>
           {[...STATES.map(s => [s, STAGE[s].tab, STAGE[s].dept]), [ANOMALY, '異常狀態', '生產部']].map(([t, l, dept]) => (
-            <button key={t} onClick={() => setActiveTab(t)} style={{ padding: '8px 4px', borderRadius: 12, border: 'none', fontSize: 14, fontWeight: 700, lineHeight: 1.35, cursor: 'pointer', fontFamily: 'inherit', background: activeTab === t ? th.header : 'transparent', color: activeTab === t ? '#fff' : (t === ANOMALY && anomalies.total > 0 ? '#e11d48' : '#94a3b8') }}>
+            <button key={t} onClick={() => setActiveTab(t)} style={{ padding: '8px 4px', borderRadius: 12, border: 'none', fontSize: 14, fontWeight: 700, lineHeight: 1.35, cursor: 'pointer', fontFamily: 'inherit', background: activeTab === t ? th.header : 'transparent', color: activeTab === t ? '#fff' : (t === ANOMALY && anomalies.total > 0 ? '#e11d48' : t === 'preorder' && cst.attention > 0 ? '#c2410c' : '#94a3b8') }}>
               <div>
                 {l}
                 {t === ANOMALY && anomalies.total > 0 && (
                   <span style={{ marginLeft: 4, background: activeTab === t ? '#fff' : '#e11d48', color: activeTab === t ? '#e11d48' : '#fff', borderRadius: 10, padding: '0 6px', fontSize: 11, fontWeight: 900 }}>{anomalies.total}</span>
+                )}
+                {t === 'preorder' && cst.attention > 0 && ( // 要處理的預排單：追蹤逾期／今天要追／沒排追蹤日／出貨日快到
+                  <span title="今天要處理的預排客訂" style={{ marginLeft: 4, background: activeTab === t ? '#fff' : '#ea580c', color: activeTab === t ? '#ea580c' : '#fff', borderRadius: 10, padding: '0 6px', fontSize: 11, fontWeight: 900 }}>{cst.attention}</span>
                 )}
               </div>
               {dept && <div style={{ fontSize: 11, fontWeight: 500, opacity: 0.85 }}>({dept})</div>}
@@ -550,8 +866,9 @@ export default function OrdersPage({ user }) {
           </div>
         )}
 
+        {activeTab === 'preorder' && renderCsPanel()}
         {activeTab === ANOMALY ? renderAnomaly() : Object.keys(groupedByCustomer).length === 0
-            ? <div style={{ textAlign: 'center', padding: '60px 0', color: '#94a3b8', fontStyle: 'italic' }}>目前無資料</div>
+            ? <div style={{ textAlign: 'center', padding: '60px 0', color: '#94a3b8', fontStyle: 'italic' }}>{activeTab === 'preorder' ? '目前沒有預排客訂。新接的單按右上「新增客訂」放進來。' : '目前無資料'}</div>
             : <div className="op-cards">{Object.entries(groupedByCustomer).map(([parentName, group]) => {
               const allOrders = group.all || []
               const subGroups = group.subGroups || { [parentName]: allOrders }
@@ -638,15 +955,18 @@ export default function OrdersPage({ user }) {
                           ))}
                         </div>
                       )}
+                      {o.status === 'preorder' && renderCsBox(o)}
                       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', paddingTop: 8, borderTop: '1px dashed #f1f5f9' }}>
                         <div style={{ fontSize: 12, color: '#94a3b8' }}>
                           {(o.scheduled_date||o.scheduledDate) && <div>排程：{o.scheduled_date||o.scheduledDate}</div>}
-                          <div style={{ fontWeight: 700, color: th.accent }}>出貨：{o.target_date||o.targetDate || '未定'}</div>
+                          <div style={{ fontWeight: 700, color: th.accent }}>{o.status === 'preorder' ? '預計出貨' : '出貨'}：{o.target_date||o.targetDate || '未定'}</div>
                         </div>
                         <div style={{ display: 'flex', gap: 4 }}>
                           <button onClick={() => openEditForm(o)} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 16, color: '#94a3b8', padding: '4px 6px' }}>✏️</button>
                           <button onClick={() => deleteOrder(o.id)} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 16, color: '#94a3b8', padding: '4px 6px' }}>🗑️</button>
-                          <button onClick={() => changeStatus(o, -1)} disabled={o.status === 'pending'} style={{ background: '#fff', border: '1px solid #e2e8f0', borderRadius: 8, cursor: 'pointer', padding: '4px 8px', fontSize: 11, color: o.status === 'pending' ? '#e2e8f0' : '#475569' }}>退回上一狀態</button>
+                          {o.status === 'preorder'
+                            ? <button onClick={() => setLostModal({ order: o, reason: '', note: '' })} style={{ background: '#fff', border: '1px solid #e2e8f0', borderRadius: 8, cursor: 'pointer', padding: '4px 8px', fontSize: 12, color: '#64748b' }}>未成交</button>
+                            : <button onClick={() => changeStatus(o, -1)} style={{ background: '#fff', border: '1px solid #e2e8f0', borderRadius: 8, cursor: 'pointer', padding: '4px 8px', fontSize: 11, color: '#475569' }}>退回上一狀態</button>}
                           {NEXT_ACTION[o.status] && (
                           <button onClick={() => openNext(o)} style={{ background: th.header, color: '#fff', border: 'none', borderRadius: 8, cursor: 'pointer', padding: '6px 14px', fontWeight: 700, fontSize: 14 }}>
                             {NEXT_ACTION[o.status]} ›
@@ -672,7 +992,34 @@ export default function OrdersPage({ user }) {
                 )}
               </div>
             )})}</div>}
+        {activeTab === 'preorder' && renderLostList()}
       </div>
+
+      {/* 未成交 */}
+      {lostModal && (
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,.7)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 120, padding: 16 }}>
+          <div style={{ background: '#fff', width: '100%', maxWidth: 340, borderRadius: 24, padding: 24 }}>
+            <h2 style={{ fontSize: 16, fontWeight: 900, marginBottom: 6 }}>標記未成交</h2>
+            <div style={{ fontSize: 13, color: '#64748b', marginBottom: 12 }}>
+              {lostModal.order.customer_name || lostModal.order.customerName} ・ {lostModal.order.item_name || lostModal.order.itemName}
+            </div>
+            <div style={{ fontSize: 13, fontWeight: 700, color: '#475569', marginBottom: 6 }}>原因</div>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 10 }}>
+              {LOST_REASONS.map(r => (
+                <button key={r} onClick={() => setLostModal(m => ({ ...m, reason: r }))} aria-pressed={lostModal.reason === r}
+                  style={{ border: `1px solid ${lostModal.reason === r ? '#475569' : '#e2e8f0'}`, background: lostModal.reason === r ? '#475569' : '#fff', color: lostModal.reason === r ? '#fff' : '#475569', borderRadius: 16, padding: '4px 12px', fontWeight: 700, fontSize: 13, cursor: 'pointer', fontFamily: 'inherit' }}>{r}</button>
+              ))}
+            </div>
+            <input value={lostModal.note} onChange={e => setLostModal(m => ({ ...m, note: e.target.value }))} placeholder="補充說明（選填）" aria-label="未成交說明"
+              style={{ width: '100%', background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 10, padding: '8px 10px', fontFamily: 'inherit', fontSize: 14 }} />
+            <div style={{ fontSize: 12, color: '#94a3b8', margin: '8px 0 14px' }}>未成交的單會移到「未成交紀錄」，不會刪掉，之後可以恢復。</div>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button onClick={() => setLostModal(null)} style={{ flex: 1, padding: '11px', background: '#f1f5f9', border: 'none', borderRadius: 12, fontWeight: 700, color: '#64748b', cursor: 'pointer' }}>取消</button>
+              <button onClick={confirmLost} style={{ flex: 2, padding: '11px', background: '#475569', color: '#fff', border: 'none', borderRadius: 12, fontWeight: 900, cursor: 'pointer' }}>確認未成交</button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* 設定 */}
       {isSettingsOpen && (
@@ -702,7 +1049,7 @@ export default function OrdersPage({ user }) {
             <div style={{ fontSize: 13, color: '#64748b', marginBottom: 16 }}>
               {statusModal.order.customer_name || statusModal.order.customerName} ・ {statusModal.order.item_name || statusModal.order.itemName}
             </div>
-            {STAGE[statusModal.order.status]?.note ? (
+            {STAGE[statusModal.order.status]?.note && (
               <div style={{ fontSize: 14, color: mth.accent, background: mth.bg, borderRadius: 12, padding: '10px 12px', marginBottom: 16, lineHeight: 1.6 }}>
                 {STAGE[statusModal.order.status].note}
                 {modalLeft && modalLeft.total > 0 && (
@@ -713,21 +1060,29 @@ export default function OrdersPage({ user }) {
                   </div>
                 )}
               </div>
-            ) : (
+            )}
+            {STAGE[statusModal.order.status]?.dateLabel && (
             <div style={{ marginBottom: 16 }}>
               <div style={{ fontSize: 13, color: '#94a3b8', fontWeight: 700, marginBottom: 6 }}>
-                {STAGE[statusModal.order.status]?.dateLabel || '日期'}
+                {STAGE[statusModal.order.status].dateLabel}
               </div>
-              <input type="date" value={statusDate} onChange={e => setStatusDate(e.target.value)}
-                style={{ width: '100%', background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 12, padding: '10px', fontFamily: 'inherit', fontSize: 15 }} />
+              <input type="date" value={statusDate} onChange={e => { setStatusDate(e.target.value); setStatusErr('') }} aria-label={STAGE[statusModal.order.status].dateLabel}
+                style={{ width: '100%', background: '#f8fafc', border: `1px solid ${statusErr ? '#f87171' : '#e2e8f0'}`, borderRadius: 12, padding: '10px', fontFamily: 'inherit', fontSize: 15 }} />
+              {statusErr && <div style={{ color: '#dc2626', fontSize: 13, fontWeight: 700, marginTop: 6 }}>{statusErr}</div>}
             </div>
             )}
             <div style={{ display: 'flex', gap: 8 }}>
               <button onClick={() => setStatusModal(null)} style={{ flex: 1, padding: '11px', background: '#f1f5f9', border: 'none', borderRadius: 12, fontWeight: 700, color: '#64748b', cursor: 'pointer' }}>取消</button>
               <button onClick={async () => {
-                const updateData = { status: statusModal.nextStatus, updated_at: new Date().toISOString() }
-                if (statusModal.order.status === 'pending') updateData.scheduled_date = statusDate
-                const { error } = await supabase.from('adv_orders').update(updateData).eq('id', statusModal.order.id)
+                const o = statusModal.order, now = new Date().toISOString()
+                const updateData = { status: statusModal.nextStatus, updated_at: now }
+                if (o.status === 'pending') updateData.scheduled_date = statusDate
+                if (o.status === 'preorder') { // 確認訂單：出貨日一定要填，記下誰、什麼時候確認
+                  if (!statusDate) { setStatusErr('請填確認出貨日'); return }
+                  updateData.target_date = statusDate
+                  updateData.cs = { ...(o.cs || {}), receivedAt: o.cs?.receivedAt || o.created_at, owner: o.cs?.owner || me, confirmedAt: now, confirmedBy: me, next: '' }
+                }
+                const { error } = await updateOrder(o.id, updateData, '狀態已更新，但')
                 if (error) { alert('狀態更新失敗：' + error.message); return }
                 fetchOrders()
                 showToast(`${statusModal.label} ✅`)
@@ -743,6 +1098,7 @@ export default function OrdersPage({ user }) {
         <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,.7)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 110, padding: 16 }}>
           <div style={{ background: '#fff', width: '100%', maxWidth: 360, borderRadius: 28, padding: 24 }}>
             <h2 style={{ fontSize: 16, fontWeight: 900, color: '#3730a3', marginBottom: 16, borderBottom: '1px solid #f1f5f9', paddingBottom: 12 }}>🛡️ 請確認訂單內容</h2>
+            {!editingOrderId && <div style={{ fontSize: 13, color: '#0e7490', fontWeight: 700, background: '#ecfeff', borderRadius: 10, padding: '8px 10px', marginBottom: 10 }}>📞 新單會先放進「預排客訂」，客戶確認後再按「確認訂單」轉給生產排程科。</div>}
             <div style={{ background: '#f8fafc', borderRadius: 12, padding: 16, marginBottom: 12 }}>
               <div style={{ fontSize: 14, color: '#64748b', marginBottom: 3 }}>客戶：<strong style={{ color: '#1e293b' }}>{pendingOrderData.customer_name}</strong></div>
               <div style={{ fontSize: 14, color: '#64748b', marginBottom: 3 }}>品項：<strong style={{ color: '#4f46e5' }}>{pendingOrderData.item_name}</strong></div>
@@ -795,10 +1151,31 @@ export default function OrdersPage({ user }) {
                 <input type="date" name="scheduled_date" value={formData.scheduled_date} onChange={handleInputChange} style={{ width: '100%', background: '#f0fdf4', border: 'none', borderRadius: 12, padding: '10px', fontFamily: 'inherit' }} />
               </div>
               <div>
-                <div style={{ fontSize: 13, color: '#ef4444', fontWeight: 700, marginBottom: 4 }}>指定出貨日 *</div>
+                <div style={{ fontSize: 13, color: '#ef4444', fontWeight: 700, marginBottom: 4 }}>{formIsPre ? '預計出貨日（可先空著）' : '指定出貨日 *'}</div>
                 <input type="date" name="target_date" value={formData.target_date} onChange={handleInputChange} style={{ width: '100%', background: '#fef2f2', border: 'none', borderRadius: 12, padding: '10px', fontFamily: 'inherit' }} />
               </div>
             </div>
+
+            {!editingOrderId && (
+              <div style={{ background: '#ecfeff', borderRadius: 16, padding: 14, marginBottom: 12 }}>
+                <div style={{ fontSize: 13, fontWeight: 700, color: '#0e7490', marginBottom: 8 }}>
+                  📞 客服追蹤 <span style={{ fontWeight: 400, color: '#64748b', fontSize: 12 }}>（新單先放「預排客訂」，客戶確認後再轉等待排程）</span>
+                </div>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+                  <div>
+                    <div style={{ fontSize: 12, color: '#0e7490', marginBottom: 3 }}>下次追蹤日</div>
+                    <input type="date" value={csDraft.next} onChange={e => setCsDraft(d => ({ ...d, next: e.target.value }))} aria-label="新單下次追蹤日"
+                      style={{ width: '100%', background: '#fff', border: 'none', borderRadius: 10, padding: '8px', fontFamily: 'inherit' }} />
+                  </div>
+                  <div>
+                    <div style={{ fontSize: 12, color: '#0e7490', marginBottom: 3 }}>負責人</div>
+                    <div style={{ background: '#fff', borderRadius: 10, padding: '8px', fontWeight: 700, color: '#164e63' }}>{me}</div>
+                  </div>
+                </div>
+                <input type="text" value={csDraft.note} onChange={e => setCsDraft(d => ({ ...d, note: e.target.value }))} placeholder="接單備註（例：LINE 詢價，待報價）" aria-label="接單備註"
+                  style={{ width: '100%', background: '#fff', border: 'none', borderRadius: 10, padding: '8px 10px', fontFamily: 'inherit', marginTop: 8, fontSize: 13 }} />
+              </div>
+            )}
 
             <div style={{ background: '#eef2ff', borderRadius: 16, padding: 14, marginBottom: 12 }}>
               <div style={{ fontSize: 13, fontWeight: 700, color: '#4f46e5', marginBottom: 10 }}>🚛 理貨與裝箱資訊</div>
