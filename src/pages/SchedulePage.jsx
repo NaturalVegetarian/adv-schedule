@@ -32,10 +32,31 @@ const INIT_VEG = [
   {name:'花椰菜',price:'',thresh:50},{name:'玉米',price:'',thresh:40},{name:'大白菜',price:'',thresh:25},
 ]
 
+// 庫存長條（資料橫條）顏色：主產品沿用 Excel「庫存量預估表」的顏色；其他品項另外配色
+const BAR_COLOR = {
+  黃金: '#6DB333', 泡菜: '#ED7D31', 咖哩: '#FFC000', 素花: '#00B451',
+  新鮮: '#FF9999', 剝皮: '#42CEC4', 酸白: '#EDE3B8', 原味: '#C8875A',
+  綠蔬: '#A5D6A7', 紅燒: '#D7A98C', 藥膳: '#C5B3E6', 香羹: '#F7CD7E',
+  珍菇: '#CDBBAA', 猴菇: '#B7C9D6', 油飯: '#9FCBEF',
+}
+const EXTRA_COLORS = ['#A7D8DE', '#F4B6C2', '#D9E8A0', '#C9C3F0', '#F6D3A8'] // 之後新增的口味輪流用
+const TOTAL_BAR = '#FF6161' // 滿福合計（同 Excel）
+// 長條長度同 Excel：最低庫存＝0%、庫存上限＝100%（庫存越少長條越短）
+const levelOf = (v, mn, mx) => (mx > mn ? (v - mn) / (mx - mn) : (v >= mn ? 1 : 0))
+const barStyle = (ratio, color) => {
+  if (!(ratio > 0)) return undefined
+  const p = Math.min(100, Math.round(ratio * 1000) / 10)
+  return { backgroundImage: `linear-gradient(90deg, ${color} ${p}%, transparent ${p}%)`, backgroundSize: '100% 74%', backgroundPosition: '0 50%', backgroundRepeat: 'no-repeat' }
+}
+// 客訂管理的關卡名稱（顯示用）
+const ORDER_STAGE = { pending: '等待排程', packaging: '包材準備', scheduled: '完成備貨', prepared: '確認出貨' }
+
 let _uid = 0
 const uid = () => `r${Date.now().toString(36)}${(_uid++).toString(36)}`
 const withIds = rows => (rows || []).map(r => (r.id ? r : { ...r, id: uid() }))
-const sortRows = rows => [...rows].sort((a, b) => (a.date || '9999').localeCompare(b.date || '9999'))
+// 扣除列（−）：直接填包數，在「日期」當天從庫存扣掉（例如包客訂）
+const isOut = r => r.kind === 'out'
+const sortRows = rows => [...rows].sort((a, b) => (a.date || '9999').localeCompare(b.date || '9999') || (isOut(a) - isOut(b)))
 const autoIn = r => r.inDate || addDays(r.date, 1) // 入庫日：沒填就是生產日隔天（同 Excel）
 
 function makeDates(startIso, count) {
@@ -49,23 +70,30 @@ function makeDates(startIso, count) {
   return out
 }
 
-// 顏色規則同 Excel：負數＝缺貨、低於最低庫存＝紅、高於庫存上限＝綠
+// 狀態同 Excel：負數＝缺貨、低於最低庫存＝粉紅、最低～上限之間＝長條（越短越接近最低）、高於上限＝滿格
 const stOf = (v, mn, mx) => v < 0 ? 'out' : (mn > 0 && v < mn) ? 'low' : (mx > 0 && v > mx) ? 'high' : 'ok'
 
-// 排程的調整紀錄
+// 排程的調整紀錄（生產列＝排程、扣除列＝扣除）
 function diffSch(prev, cur) {
   const out = []
-  const d = r => `${r.date ? `${mdOf(r.date)}（${wdOf(r.date).slice(1)}）` : '未定日期'} ${r.item} ${r.barrels}桶`
+  const day = iso => (iso ? `${mdOf(iso)}（${wdOf(iso).slice(1)}）` : '未定日期')
+  const d = r => isOut(r)
+    ? `${day(r.date)} ${r.item} −${Number(r.qty) || 0}包${r.note ? `（${r.note}）` : ''}`
+    : `${day(r.date)} ${r.item} ${r.barrels}桶`
+  const kind = r => (isOut(r) ? '扣除' : '排程')
+  const changed = (o, r) => isOut(r)
+    ? o.date !== r.date || o.item !== r.item || Number(o.qty) !== Number(r.qty) || (o.note || '') !== (r.note || '')
+    : o.date !== r.date || o.item !== r.item || Number(o.barrels) !== Number(r.barrels) || (o.inDate || '') !== (r.inDate || '')
   const pm = Object.fromEntries(prev.map(r => [r.id, r]))
   const cm = Object.fromEntries(cur.map(r => [r.id, r]))
   cur.forEach(r => {
     const o = pm[r.id]
-    if (!r.item) { if (o?.item) out.push(`刪除排程 ${d(o)}`); return }
-    if (!o || !o.item) { out.push(`新增排程 ${d(r)}`); return }
-    if (o.date !== r.date || o.item !== r.item || Number(o.barrels) !== Number(r.barrels) || (o.inDate || '') !== (r.inDate || ''))
-      out.push(`修改排程 ${d(o)} → ${d(r)}${r.inDate ? `（入庫 ${mdOf(r.inDate)}）` : ''}`)
+    if (!r.item) { if (o?.item) out.push(`刪除${kind(o)} ${d(o)}`); return }
+    if (!o || !o.item) { out.push(`新增${kind(r)} ${d(r)}`); return }
+    if (changed(o, r))
+      out.push(`修改${kind(r)} ${d(o)} → ${d(r)}${!isOut(r) && r.inDate ? `（入庫 ${mdOf(r.inDate)}）` : ''}`)
   })
-  prev.forEach(o => { if (!cm[o.id] && o.item) out.push(`刪除排程 ${d(o)}`) })
+  prev.forEach(o => { if (!cm[o.id] && o.item) out.push(`刪除${kind(o)} ${d(o)}`) })
   return out
 }
 const diffPpb = (p, c) => Object.keys({ ...p, ...c }).filter(f => Number(p[f]) !== Number(c[f])).map(f => `${f} 每桶產量 ${p[f] ?? '—'} → ${c[f]} 包`)
@@ -93,6 +121,8 @@ export default function SchedulePage() {
   const [lastSaved, setLastSaved] = useState(null)
   const [logs, setLogs] = useState([])
   const [linked, setLinked] = useState({ sales: null, inventory: null })
+  const [showOrd, setShowOrd] = useState(true) // 客訂出貨清單展開／收合
+  const [flash, setFlash] = useState(null) // 剛加入的扣除列，閃一下
 
   const showToast = msg => { setToast(msg); setTimeout(() => setToast(null), 3000) }
   const today = todayIso()
@@ -109,6 +139,7 @@ export default function SchedulePage() {
       if (data) {
         // 舊資料的入庫日如果剛好是生產日隔天，就視為「自動」
         const rows = withIds(data.sch_data).map(r => {
+          if (isOut(r)) return { ...r, date: toIso(r.date) }
           const date = toIso(r.date), inDate = toIso(r.inDate)
           return { ...r, date, inDate: inDate && inDate !== addDays(date, 1) ? inDate : '' }
         })
@@ -124,7 +155,7 @@ export default function SchedulePage() {
     })()
   }, [])
 
-  // 客訂（只列在最右欄，不扣庫存）
+  // 客訂（列在生產排程表上方；按「− 扣庫存」才會扣）
   useEffect(() => {
     const fetchOrders = async () => {
       const { data } = await supabase.from('adv_orders').select('*').in('status', ['pending','packaging','scheduled','prepared'])
@@ -188,9 +219,14 @@ export default function SchedulePage() {
 
   // ── 庫存量預估 ──
   const plan = useMemo(() => {
-    const im = {}, prodDays = {}
+    const im = {}, om = {}, prodDays = {}
     schData.forEach(r => {
       if (!r.item || !r.date) return
+      if (isOut(r)) { // 扣除列：日期當天扣
+        const q = Number(r.qty) || 0
+        if (q > 0) { om[r.date] = om[r.date] || {}; om[r.date][r.item] = (om[r.date][r.item] || 0) + q }
+        return
+      }
       const ind = autoIn(r)
       const p = (Number(ppb[r.item]) || 0) * (Number(r.barrels) || 0)
       im[ind] = im[ind] || {}
@@ -204,8 +240,9 @@ export default function SchedulePage() {
       res[f] = DATES.map(d => {
         const add = im[d.iso]?.[f] || 0
         const cs = cf[d.iso]?.[f] || 0
-        run = run - b.d * multOf(f, d.iso) - cs + add
-        return { raw: run, v: Math.round(run) || 0, add, cs } // || 0：避免顯示 -0
+        const ot = om[d.iso]?.[f] || 0
+        run = run - b.d * multOf(f, d.iso) - cs - ot + add
+        return { raw: run, v: Math.round(run) || 0, add, cs, ot } // || 0：避免顯示 -0
       })
     })
     const mainTotal = DATES.map((_, i) => L.main.reduce((s, f) => s + res[f][i].raw, 0))
@@ -214,38 +251,56 @@ export default function SchedulePage() {
 
   const hasSch = useMemo(() => {
     const first = DATES[0]?.iso, last = DATES[DATES.length - 1]?.iso
-    return new Set(schData.filter(r => r.item && r.date && autoIn(r) >= first && autoIn(r) <= last).map(r => r.item))
+    return new Set(schData.filter(r => !isOut(r) && r.item && r.date && autoIn(r) >= first && autoIn(r) <= last).map(r => r.item))
   }, [schData, DATES])
+
+  // 每個口味的長條顏色（沒有預設色的新口味輪流配色）
+  const colors = useMemo(() => {
+    let k = 0
+    return Object.fromEntries(L.all.map(f => [f, BAR_COLOR[f] || EXTRA_COLORS[k++ % EXTRA_COLORS.length]]))
+  }, [L])
 
   // 客訂異常（逾期未出貨／即將到期還沒備貨／未填出貨日）：規則跟「客訂管理 → 異常狀態（生產部）」同一套
   const anomaly = useMemo(() => orderAnomalies(orders, today), [orders, today])
 
-  // 客訂出貨清單：只列今天以後、還沒出貨的客訂（依出貨日列在最右欄）
-  // 已過出貨日、未填出貨日的屬於異常，不再塞在第一天，改到客訂管理的「異常狀態」處理
-  const orderInfo = useMemo(() => {
-    const first = DATES[0]?.iso, last = DATES[DATES.length - 1]?.iso
+  // 客訂出貨清單（整合在生產排程表上方）：今天以後、還沒出貨的客訂，依出貨日排序
+  // 已過出貨日、未填出貨日的屬於異常，到客訂管理的「異常狀態」處理
+  const orderList = useMemo(() => {
     const soonIds = new Set(anomaly.soon.map(o => o.id))
-    const byIso = {}
-    orders.forEach(o => {
-      const td = shipDateOf(o)
-      if (!td || td < today || td < first || td > last) return
-      const name = o.item_name || o.itemName || ''
-      const f = L.all.find(x => name.includes(x))
-      ;(byIso[td] = byIso[td] || []).push({
-        text: `${o.customer_name || o.customerName || '未知客戶'} ${f || name} ${Number(o.quantity) || 0}${o.unit || '袋'}`,
-        warn: soonIds.has(o.id), // 快到出貨日但還沒備好貨 → 標紅
+    const used = {} // 已經扣過庫存的客訂 → 對應的扣除列
+    schData.forEach(r => { if (isOut(r) && r.orderId) used[r.orderId] = r })
+    return orders
+      .map(o => ({ o, td: shipDateOf(o) }))
+      .filter(x => x.td && x.td >= today)
+      .sort((a, b) => a.td.localeCompare(b.td))
+      .map(({ o, td }) => {
+        const name = o.item_name || o.itemName || ''
+        return { o, td, name, f: L.all.find(x => name.includes(x)) || '', warn: soonIds.has(o.id), row: used[o.id] || null }
       })
-    })
-    return { byIso }
-  }, [orders, DATES, L, today, anomaly])
+  }, [orders, anomaly, schData, today, L])
+  const ordPending = orderList.filter(x => !x.row).length
   const todayShip = orders.filter(o => toIso(o.target_date || o.targetDate) === today)
+
+  // 客訂 → 加一列扣除（日期＝出貨日、包數＝訂單數量，都可以再改）
+  const deductOrder = x => {
+    if (x.row) return
+    const r = { id: uid(), kind: 'out', date: x.td, item: x.f, qty: String(Number(x.o.quantity) || 0), note: x.o.customer_name || x.o.customerName || '', orderId: x.o.id, barrels: 0 }
+    setSchData(rows => sortRows([...rows, r]))
+    setFlash(r.id); setTimeout(() => setFlash(f => (f === r.id ? null : f)), 1800)
+    showToast(`已加入扣除：${mdOf(r.date)} ${r.item || '（請選口味）'} −${r.qty} 包，記得存檔`)
+  }
+  const addOut = () => {
+    const r = { id: uid(), kind: 'out', date: today, item: '', qty: '', note: '', barrels: 0 } // barrels: 0 → 其他程式讀到也不會當成生產
+    setSchData(d => [...d, r])
+    setFlash(r.id); setTimeout(() => setFlash(f => (f === r.id ? null : f)), 1800)
+  }
 
   // ── 排程輸入 ──
   const updateSch = (id, k, v) => setSchData(rows => rows.map(r => r.id === id ? { ...r, [k]: v } : r))
   const generate = () => {
     const from = parseIso(gen.from), to = parseIso(gen.to)
     if (!from || !to || to < from) { showToast('請選開始與結束日期'); return }
-    const have = new Set(schData.map(r => r.date))
+    const have = new Set(schData.filter(r => !isOut(r)).map(r => r.date))
     const add = []
     for (let d = new Date(from), n = 0; d <= to && n < 120; d.setDate(d.getDate() + 1), n++) {
       const w = d.getDay(), iso = isoOf(d)
@@ -256,7 +311,8 @@ export default function SchedulePage() {
     showToast(add.length ? `已產生 ${add.length} 列，請選口味與桶數` : '這段日期都已經有排程了')
   }
   const blankCount = schData.filter(r => !r.item).length
-  const tot = schData.reduce((s, r) => s + (r.item ? (Number(ppb[r.item]) || 0) * (Number(r.barrels) || 0) : 0), 0)
+  const tot = schData.reduce((s, r) => s + (r.item && !isOut(r) ? (Number(ppb[r.item]) || 0) * (Number(r.barrels) || 0) : 0), 0)
+  const outTot = schData.reduce((s, r) => s + (r.item && isOut(r) ? Number(r.qty) || 0 : 0), 0)
 
   // ── 存檔 ──
   const schChanges = useMemo(() => diffSch(savedSch, schData), [savedSch, schData])
@@ -350,7 +406,30 @@ export default function SchedulePage() {
         @media (min-width: 1400px) { .ps-layout { grid-template-columns: minmax(600px, 40%) 1fr; } .pf-scroll { max-height: calc(100vh - 260px) !important; } }
         .ps-gen { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 10px; padding: 8px 10px; margin-bottom: 10px; font-size: 13px; color: #475569; }
         .ps-tbl td { padding: 6px 6px !important; }
+        .ps-out td { background: #fff5f5; }
         .ps-blank td { background: #fffbeb; }
+        .ps-outchip { display: inline-block; font-size: 12px; font-weight: 800; color: #b91c1c; background: #fee2e2; border: 1px solid #fecaca; border-radius: 6px; padding: 1px 8px; white-space: nowrap; }
+        .ps-flash td { animation: psflash 1.8s ease-out; }
+        @keyframes psflash { 0%, 35% { background: #fde68a; } 100% { background: #fff5f5; } }
+        .ps-addbtn { flex: 1; min-width: 130px; font-size: 13px; border-radius: 7px; padding: 6px 0; cursor: pointer; font-family: inherit; }
+        .ps-ord { border: 1px solid #fde68a; background: #fffbeb; border-radius: 10px; margin-bottom: 10px; overflow: hidden; }
+        .ps-ord-h { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; width: 100%; background: none; border: none; padding: 8px 10px; cursor: pointer; font-family: inherit; font-size: 14px; color: #78350f; text-align: left; }
+        .ps-ord-list { max-height: 232px; overflow: auto; border-top: 1px solid #fde68a; background: #fff; }
+        .ps-ord-row { display: grid; grid-template-columns: 82px minmax(0, 1fr) 44px 64px 62px 104px; align-items: center; gap: 6px; padding: 5px 10px; font-size: 13px; border-bottom: 1px dashed #fde68a; }
+        .ps-ord-row .d { color: #475569; font-weight: 700; white-space: nowrap; }
+        .ps-ord-row .c { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #1e293b; }
+        .ps-ord-row .f { font-weight: 800; color: #334155; }
+        .ps-ord-row .q { text-align: right; font-weight: 700; white-space: nowrap; }
+        .ps-ord-row .s { font-size: 11px; color: #64748b; background: #f1f5f9; border-radius: 10px; padding: 1px 4px; text-align: center; white-space: nowrap; }
+        .ps-ord-row.warn .d, .ps-ord-row.warn .c { color: #be123c; font-weight: 800; }
+        .ps-ord-btn { justify-self: end; font-size: 13px; font-weight: 800; color: #fff; background: #dc2626; border: none; border-radius: 7px; padding: 4px 9px; cursor: pointer; font-family: inherit; white-space: nowrap; }
+        .ps-ord-done { justify-self: end; font-size: 12px; color: #047857; font-weight: 700; white-space: nowrap; }
+        .ps-ord-tip { font-size: 12px; color: #92400e; padding: 6px 10px 8px; line-height: 1.6; border-top: 1px solid #fde68a; }
+        @media (max-width: 560px) {
+          .ps-ord-row { grid-template-columns: 80px minmax(0, 1fr) 40px 60px; }
+          .ps-ord-row .s { display: none; }
+          .ps-ord-row .ps-ord-btn, .ps-ord-row .ps-ord-done { grid-column: 1 / -1; }
+        }
         .pf-scroll { overflow: auto; max-height: 560px; border: 1px solid #e2e8f0; border-radius: 8px; }
         .pf { border-collapse: separate; border-spacing: 0; font-size: 12px; min-width: 100%; }
         .pf th { position: sticky; top: 0; z-index: 2; background: #f8fafc; color: #334155; font-weight: 800; font-size: 13px; padding: 6px 6px; border-bottom: 2px solid #cbd5e1; white-space: nowrap; text-align: right; }
@@ -360,15 +439,15 @@ export default function SchedulePage() {
         .pf .pf-total { background: #f8fafc; font-weight: 800; color: #1e293b; border-right: 2px solid #cbd5e1; }
         .pf th.pf-total { background: #eef2f7; }
         .pf .pf-sep { border-left: 2px solid #94a3b8; }
-        .pf .pf-c { min-width: 60px; }
+        .pf .pf-c { min-width: 64px; }
         .pf .pf-n { font-weight: 700; font-size: 13px; line-height: 1.2; }
         .pf .pf-x { font-size: 10px; line-height: 1.1; }
         .pf-plus { color: #047857; font-weight: 800; }
         .pf-minus { color: #b91c1c; font-weight: 800; margin-left: 3px; }
-        .pf td.pf-out { background: #fecaca; color: #7f1d1d; }
-        .pf td.pf-low { background: #fee2e2; color: #b91c1c; }
-        .pf td.pf-high { background: #dcfce7; color: #166534; }
-        .pf td.pf-ok { color: #1e293b; }
+        .pf td.pf-out { background: #f87171; color: #450a0a; }
+        .pf td.pf-out .pf-n { font-weight: 900; }
+        .pf td.pf-low { background: #ffc7ce; color: #9c0006; }
+        .pf td.pf-high, .pf td.pf-ok { color: #1e293b; }
         .pf td.pf-in { box-shadow: inset 0 0 0 2px #059669; }
         .pf tr.pf-we .pf-date { color: #94a3b8; }
         .pf tr.pf-month td { border-top: 2px solid #94a3b8; }
@@ -377,8 +456,7 @@ export default function SchedulePage() {
         .pf tbody tr:hover td { filter: brightness(0.96); }
         .pf-chip { margin-left: 4px; font-size: 10px; border-radius: 4px; padding: 0 4px; font-weight: 700; }
         .pf-tag { margin-left: 3px; font-size: 9px; background: #1e293b; color: #fff; border-radius: 3px; padding: 0 3px; vertical-align: middle; }
-        .pf .pf-cust { text-align: left; font-size: 11px; color: #065f46; min-width: 160px; border-left: 2px solid #94a3b8; white-space: normal; }
-        .pf td.pf-over { background: #ffedd5; color: #9a3412; }
+        .pf td.pf-over { color: #9c0006; font-weight: 900; }
         .pf-lg { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; color: #475569; margin-right: 10px; }
         .pf-lg i { display: inline-block; width: 14px; height: 12px; border-radius: 3px; }
       `}</style>
@@ -431,6 +509,42 @@ export default function SchedulePage() {
             </div>
           </div>
 
+          {/* 客訂出貨（從客訂管理帶入）：按「− 扣庫存」就在排程表加一列扣除 */}
+          <div className="ps-ord">
+            <button className="ps-ord-h" onClick={() => setShowOrd(v => !v)} aria-expanded={showOrd}>
+              <strong>📦 客訂出貨</strong>
+              <span style={{ fontSize: 13 }}>
+                {orderList.length === 0 ? '目前沒有待出貨的客訂' : `${orderList.length} 筆${ordPending > 0 ? `，${ordPending} 筆還沒扣庫存` : '，都已扣庫存'}`}
+              </span>
+              <span style={{ marginLeft: 'auto', fontSize: 12 }}>{showOrd ? '收合 ▲' : '展開 ▼'}</span>
+            </button>
+            {showOrd && orderList.length > 0 && (
+              <>
+                <div className="ps-ord-list">
+                  {orderList.map(x => {
+                    const cust = x.o.customer_name || x.o.customerName || '未知客戶'
+                    return (
+                      <div key={x.o.id} className={`ps-ord-row${x.warn ? ' warn' : ''}`} title={x.warn ? '快到出貨日，還沒完成備貨' : `${cust}｜${x.name}`}>
+                        <span className="d">{mdOf(x.td)}（{wdOf(x.td).slice(1)}）</span>
+                        <span className="c">{x.warn ? '⚠ ' : ''}{cust}</span>
+                        <span className="f">{x.f || '—'}</span>
+                        <span className="q">{Number(x.o.quantity) || 0}{x.o.unit || '袋'}</span>
+                        <span className="s">{ORDER_STAGE[x.o.status] || ''}</span>
+                        {x.row
+                          ? <span className="ps-ord-done">✓ 已扣 −{Number(x.row.qty) || 0} 包{x.row.date !== x.td ? `（${mdOf(x.row.date)}）` : ''}</span>
+                          : <button className="ps-ord-btn" onClick={() => deductOrder(x)}>− 扣庫存</button>}
+                      </div>
+                    )
+                  })}
+                </div>
+                <div className="ps-ord-tip">
+                  按「− 扣庫存」會在下面排程表加一列扣除（日期＝出貨日、包數＝訂單數量，都可以再改），存檔後預估表當天就會扣掉。
+                  已過出貨日、未填出貨日的客訂請到「客訂管理 → 異常狀態」處理。
+                </div>
+              </>
+            )}
+          </div>
+
           {/* 批次產生 */}
           <div className="ps-gen">
             <strong style={{ color: '#334155' }}>批次產生</strong>
@@ -447,21 +561,56 @@ export default function SchedulePage() {
           <div style={{ overflowX: 'auto' }}>
             <table className="tbl ps-tbl" style={{ fontSize: 14 }}>
               <thead><tr>
-                <th>生產日期</th>
+                <th>日期</th>
                 <th>品項</th>
                 <th style={{ textAlign: 'center' }}>桶數</th>
                 <th style={{ textAlign: 'right' }}>包數</th>
-                <th>入庫日期</th>
+                <th>入庫日期／說明</th>
                 <th style={{ width: 28 }}></th>
                 <th style={{ width: 24 }}></th>
               </tr></thead>
               <tbody>
                 {schData.length === 0 && (
-                  <tr><td colSpan={7} style={{ textAlign: 'center', color: '#94a3b8', padding: 18 }}>還沒有排程。用上面的「批次產生」或下面的「＋新增一列」開始。</td></tr>
+                  <tr><td colSpan={7} style={{ textAlign: 'center', color: '#94a3b8', padding: 18 }}>還沒有排程。用上面的「批次產生」或下面的「＋ 新增生產」開始；要扣庫存（例如包客訂）按「− 新增扣除」。</td></tr>
                 )}
                 {schData.map(r => {
-                  const pk = r.item ? (Number(ppb[r.item]) || 0) * (Number(r.barrels) || 0) : 0
                   const isSub = r.item && !L.main.includes(r.item)
+                  const itemSelect = (
+                    <select className="inp" value={r.item} onChange={e => updateSch(r.id, 'item', e.target.value)}
+                      style={{ width: 92, fontSize: 13, borderColor: r.item ? undefined : '#f59e0b', background: isSub ? '#f5f3ff' : undefined }} aria-label="品項">
+                      <option value="">選擇口味</option>
+                      <optgroup label="主產品">{L.main.map(f => <option key={f} value={f}>{f}</option>)}</optgroup>
+                      <optgroup label="其他品項">{L.sub.map(f => <option key={f} value={f}>{f}</option>)}</optgroup>
+                    </select>
+                  )
+                  const delBtn = (
+                    <button onClick={() => setSchData(d => d.filter(x => x.id !== r.id))} title="刪除這列"
+                      style={{ color: '#94a3b8', background: 'none', border: 'none', cursor: 'pointer', fontSize: 15, padding: '0 2px' }}>×</button>
+                  )
+                  // ── 扣除列（−）：直接填包數，日期當天從庫存扣掉 ──
+                  if (isOut(r)) return (
+                    <tr key={r.id} className={`ps-out${r.item ? '' : ' ps-blank'}${flash === r.id ? ' ps-flash' : ''}`}>
+                      <td style={{ whiteSpace: 'nowrap' }}>
+                        <input type="date" className="inp" value={r.date || ''} onChange={e => updateSch(r.id, 'date', e.target.value)} style={{ width: 140, fontSize: 13 }} aria-label="扣除日期" />
+                        <span style={{ fontSize: 12, color: '#94a3b8', marginLeft: 4 }}>{wdOf(r.date)}</span>
+                      </td>
+                      <td>{itemSelect}</td>
+                      <td style={{ textAlign: 'center' }}><span className="ps-outchip">− 扣除</span></td>
+                      <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
+                        <span style={{ color: '#b91c1c', fontWeight: 900, marginRight: 2 }}>−</span>
+                        <input type="number" min="0" inputMode="numeric" className="inp" value={r.qty ?? ''} placeholder="包數"
+                          onChange={e => updateSch(r.id, 'qty', e.target.value === '' ? '' : String(Math.abs(Number(e.target.value)) || 0))}
+                          style={{ width: 74, fontSize: 13, textAlign: 'right', color: '#b91c1c', fontWeight: 700 }} aria-label="扣除包數" />
+                      </td>
+                      <td>
+                        <input className="inp" value={r.note || ''} onChange={e => updateSch(r.id, 'note', e.target.value)} placeholder="客戶／原因（例：包客訂）"
+                          style={{ width: 170, fontSize: 13 }} aria-label="扣除說明" />
+                      </td>
+                      <td>{r.orderId && <span title="由客訂出貨帶入" style={{ fontSize: 13, opacity: 0.6 }}>🔗</span>}</td>
+                      <td>{delBtn}</td>
+                    </tr>
+                  )
+                  const pk = r.item ? (Number(ppb[r.item]) || 0) * (Number(r.barrels) || 0) : 0
                   const gcLink = makeGoogleCalLink(r)
                   const inAuto = !r.inDate
                   return (
@@ -470,14 +619,7 @@ export default function SchedulePage() {
                         <input type="date" className="inp" value={r.date || ''} onChange={e => updateSch(r.id, 'date', e.target.value)} style={{ width: 140, fontSize: 13 }} aria-label="生產日期" />
                         <span style={{ fontSize: 12, color: r.date && [0, 6].includes(parseIso(r.date)?.getDay()) ? '#c2410c' : '#94a3b8', marginLeft: 4 }}>{wdOf(r.date)}</span>
                       </td>
-                      <td>
-                        <select className="inp" value={r.item} onChange={e => updateSch(r.id, 'item', e.target.value)}
-                          style={{ width: 92, fontSize: 13, borderColor: r.item ? undefined : '#f59e0b', background: isSub ? '#f5f3ff' : undefined }} aria-label="品項">
-                          <option value="">選擇口味</option>
-                          <optgroup label="主產品">{L.main.map(f => <option key={f} value={f}>{f}</option>)}</optgroup>
-                          <optgroup label="其他品項">{L.sub.map(f => <option key={f} value={f}>{f}</option>)}</optgroup>
-                        </select>
-                      </td>
+                      <td>{itemSelect}</td>
                       <td>
                         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 3 }}>
                           <button onClick={() => updateSch(r.id, 'barrels', Math.max(1, (Number(r.barrels) || 1) - 1))}
@@ -498,10 +640,7 @@ export default function SchedulePage() {
                       <td>
                         {gcLink && <a href={gcLink} target="_blank" rel="noreferrer" title="加入 Google 日曆" style={{ fontSize: 14, textDecoration: 'none', opacity: 0.6 }}>📅</a>}
                       </td>
-                      <td>
-                        <button onClick={() => setSchData(d => d.filter(x => x.id !== r.id))} title="刪除這列"
-                          style={{ color: '#94a3b8', background: 'none', border: 'none', cursor: 'pointer', fontSize: 15, padding: '0 2px' }}>×</button>
-                      </td>
+                      <td>{delBtn}</td>
                     </tr>
                   )
                 })}
@@ -509,13 +648,18 @@ export default function SchedulePage() {
             </table>
           </div>
           <div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-            <button onClick={() => setSchData(d => [...d, { id: uid(), date: '', item: '', barrels: 4, inDate: '' }])}
-              style={{ flex: 1, minWidth: 140, fontSize: 13, color: '#64748b', background: 'none', border: '1px dashed #cbd5e1', borderRadius: 7, padding: '6px 0', cursor: 'pointer' }}>＋ 新增一列</button>
+            <button className="ps-addbtn" onClick={() => setSchData(d => [...d, { id: uid(), date: '', item: '', barrels: 4, inDate: '' }])}
+              style={{ color: '#047857', background: 'none', border: '1px dashed #6ee7b7' }}>＋ 新增生產</button>
+            <button className="ps-addbtn" onClick={addOut} title="例如今天要包客訂 200 包，就新增一列扣除 200 包"
+              style={{ color: '#b91c1c', background: 'none', border: '1px dashed #fca5a5' }}>− 新增扣除</button>
             {blankCount > 0 && (
               <button onClick={() => setSchData(d => d.filter(r => r.item))}
                 style={{ fontSize: 13, color: '#b45309', background: '#fffbeb', border: '1px solid #fde68a', borderRadius: 7, padding: '6px 12px', cursor: 'pointer' }}>清除未選口味的 {blankCount} 列</button>
             )}
-            <span style={{ fontSize: 13, color: '#64748b' }}>合計 <strong style={{ color: '#1e293b' }}>{tot > 0 ? `${tot.toLocaleString()} 包` : '—'}</strong></span>
+            <span style={{ fontSize: 13, color: '#64748b' }}>
+              合計 生產 <strong style={{ color: '#047857' }}>{tot > 0 ? `+${tot.toLocaleString()} 包` : '—'}</strong>
+              {outTot > 0 && <>　扣除 <strong style={{ color: '#b91c1c' }}>−{outTot.toLocaleString()} 包</strong></>}
+            </span>
           </div>
 
           {/* 產量與備用設定 */}
@@ -573,30 +717,32 @@ export default function SchedulePage() {
             </div>
           )}
           <div style={{ fontSize: 12, color: '#64748b', marginBottom: 6, lineHeight: 1.8 }}>
-            每日庫存 ＝ 前一天 − 每日預估（含節日加乘）− 已確定銷售量 ＋ 入庫　｜
+            每日庫存 ＝ 前一天 − 每日預估（含節日加乘）− 已確定銷售量 − 扣除 ＋ 入庫　｜
             起始庫存、上限：{linked.inventory ? <strong style={{ color: '#059669' }}>② 庫存狀況</strong> : <span style={{ color: '#c2410c' }}>⚙ 備用值（庫存狀況尚未存檔）</span>}　｜
             每日預估、最低庫存、已確定銷售：{linked.sales ? <strong style={{ color: '#059669' }}>① 銷售計畫</strong> : <span style={{ color: '#c2410c' }}>⚙ 備用值（銷售計畫尚未存檔）</span>}
           </div>
-          <div style={{ marginBottom: 6 }}>
-            <span className="pf-lg"><i style={{ background: '#fecaca' }} />缺貨（負數）</span>
-            <span className="pf-lg"><i style={{ background: '#fee2e2' }} />低於最低庫存</span>
-            <span className="pf-lg"><i style={{ background: '#fff', border: '1px solid #e2e8f0' }} />正常</span>
-            <span className="pf-lg"><i style={{ background: '#dcfce7' }} />高於庫存上限</span>
+          <div style={{ marginBottom: 6, lineHeight: 2 }}>
+            <span className="pf-lg">
+              <i style={{ width: 34, border: '1px solid #e2e8f0', background: 'linear-gradient(90deg, #6DB333 100%, #fff 0)' }} />
+              <i style={{ width: 34, border: '1px solid #e2e8f0', background: 'linear-gradient(90deg, #6DB333 45%, #fff 45%)' }} />
+              長條越短＝越接近最低庫存（滿格＝到庫存上限，顏色依口味）
+            </span>
+            <span className="pf-lg"><i style={{ background: '#ffc7ce' }} />低於最低庫存</span>
+            <span className="pf-lg"><i style={{ background: '#f87171' }} />缺貨（負數）</span>
             <span className="pf-lg"><i style={{ boxShadow: 'inset 0 0 0 2px #059669' }} /><span className="pf-plus">+數字</span>＝當天入庫</span>
-            <span className="pf-lg"><span className="pf-minus">−數字</span>＝已確定銷售</span>
+            <span className="pf-lg"><span className="pf-minus">−數字</span>＝扣除（排程表扣除＋已確定銷售）</span>
           </div>
           <div className="pf-scroll">
             <table className="pf">
               <thead><tr>
                 <th className="pf-date" style={{ textAlign: 'left' }}>日期</th>
-                <th className="pf-total" title={`主產品合計／最高庫容量 ${maxCap.toLocaleString()} 包`}>滿福合計</th>
+                <th className="pf-total" title={`主產品合計／最高庫容量 ${maxCap.toLocaleString()} 包`} style={{ boxShadow: `inset 0 -4px 0 ${TOTAL_BAR}` }}>滿福合計</th>
                 {L.all.map((f, i) => (
-                  <th key={f} className={i === L.main.length ? 'pf-sep' : ''}
+                  <th key={f} className={i === L.main.length ? 'pf-sep' : ''} style={{ boxShadow: `inset 0 -4px 0 ${colors[f]}` }}
                     title={`每日預估 ${Math.round(eff[f].d * 10) / 10} · 最低 ${Math.round(eff[f].mn)} · 上限 ${eff[f].mx ? Math.round(eff[f].mx) : '—'} · 每桶 ${ppb[f] ?? '—'} 包`}>
                     {f}{hasSch.has(f) && <span className="pf-tag">排</span>}
                   </th>
                 ))}
-                <th className="pf-cust">客訂出貨（只列出）</th>
               </tr></thead>
               <tbody>
                 {DATES.map((d, di) => {
@@ -610,27 +756,33 @@ export default function SchedulePage() {
                         {d.iso === today && <span className="pf-chip" style={{ background: '#2563eb', color: '#fff' }}>今天</span>}
                         {prod && <span className="pf-chip" style={{ background: '#dcfce7', color: '#166534' }}>生產</span>}
                       </td>
-                      <td className={`pf-total${total > maxCap ? ' pf-over' : ''}`} title={total > maxCap ? `超過最高庫容量 ${maxCap.toLocaleString()} 包` : ''}>
+                      <td className={`pf-total${total > maxCap ? ' pf-over' : ''}`} style={barStyle(maxCap > 0 ? total / maxCap : 0, TOTAL_BAR)}
+                        title={`滿福合計 ${Math.round(total).toLocaleString()} 包／最高庫容量 ${maxCap.toLocaleString()} 包${total > maxCap ? '（超過庫容量）' : ''}`}>
                         {Math.round(total).toLocaleString()}
                       </td>
                       {L.all.map((f, i) => {
                         const c = plan.res[f][di]
-                        const st = stOf(c.v, eff[f].mn, eff[f].mx)
+                        const { mn, mx } = eff[f]
+                        const st = stOf(c.v, mn, mx)
+                        const minus = c.cs + c.ot
+                        // 長條：只畫在「最低庫存以上」的格子；低於最低＝粉紅、缺貨＝紅（同 Excel）
+                        const bar = st === 'ok' || st === 'high' ? barStyle(levelOf(c.raw, mn, mx), colors[f]) : undefined
+                        const tip = [`${f} ${d.lb}：${c.v.toLocaleString()} 包（最低 ${Math.round(mn).toLocaleString()}／上限 ${mx ? Math.round(mx).toLocaleString() : '—'}）`,
+                          c.add > 0 && `入庫 +${Math.round(c.add).toLocaleString()}`,
+                          c.ot > 0 && `排程表扣除 −${Math.round(c.ot).toLocaleString()}`,
+                          c.cs > 0 && `已確定銷售 −${Math.round(c.cs).toLocaleString()}`].filter(Boolean).join('\n')
                         return (
-                          <td key={f} className={`pf-c pf-${st}${c.add ? ' pf-in' : ''}${i === L.main.length ? ' pf-sep' : ''}`}>
+                          <td key={f} className={`pf-c pf-${st}${c.add ? ' pf-in' : ''}${i === L.main.length ? ' pf-sep' : ''}`} style={bar} title={tip}>
                             <div className="pf-n">{c.v.toLocaleString()}</div>
-                            {(c.add > 0 || c.cs > 0) && (
+                            {(c.add > 0 || minus > 0) && (
                               <div className="pf-x">
                                 {c.add > 0 && <span className="pf-plus">+{Math.round(c.add).toLocaleString()}</span>}
-                                {c.cs > 0 && <span className="pf-minus">−{Math.round(c.cs).toLocaleString()}</span>}
+                                {minus > 0 && <span className="pf-minus">−{Math.round(minus).toLocaleString()}</span>}
                               </div>
                             )}
                           </td>
                         )
                       })}
-                      <td className="pf-cust">
-                        {(orderInfo.byIso[d.iso] || []).map((c, k) => <div key={k} style={c.warn ? { color: '#be123c', fontWeight: 700 } : undefined} title={c.warn ? '快到出貨日，還沒完成備貨' : undefined}>{c.warn ? '⚠ ' : ''}{c.text}</div>)}
-                      </td>
                     </tr>
                   )
                 })}
