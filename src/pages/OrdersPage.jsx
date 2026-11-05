@@ -1,5 +1,6 @@
 import { useState, useEffect, useMemo, useRef } from 'react'
 import { supabase } from '../lib/supabase'
+import { toIso, todayIso, addDays } from '../lib/flavors'
 
 // 訂單流程（資料庫狀態值不變，只改顯示名稱）：
 // 等待排程(生產排程科) → 包材準備(原物料倉庫管理科) → 完成備貨(包裝科) → 確認出貨(出貨交運科) → 完成出貨
@@ -11,8 +12,34 @@ const STAGE = {
   prepared:  { tab: '確認出貨', dept: '出貨交運科',       action: '確認出貨', dateLabel: '確認出貨日期' },
   shipped:   { tab: '完成出貨', dept: '' },
 }
+// 異常狀態（生產部）：不是流程中的一關，而是系統自動整理「出貨有問題」的客訂，給生產部長做異常通知
+const ANOMALY = 'anomaly'
+const SOON_DAYS = 2 // 幾天內要出貨、卻還沒完成備貨，算「即將到期」
 const STATUS_LABEL = Object.fromEntries(STATES.map(s => [s, STAGE[s].tab]))
 const NEXT_ACTION = Object.fromEntries(STATES.filter(s => STAGE[s].action).map(s => [s, STAGE[s].action]))
+
+// 出貨日統一成 YYYY-MM-DD（舊資料可能是 2026/11/4 或 11/4）
+export const shipDateOf = o => toIso(o.target_date || o.targetDate)
+
+// 異常規則（生產排程頁上方的提示也用這個，兩邊數字才會一致）：
+//   逾期未出貨＝出貨日已過、還沒完成出貨
+//   即將到期＝SOON_DAYS 天內要出貨，但還在等待排程／包材準備／完成備貨（還沒備好貨）
+//   未填出貨日＝沒有出貨日
+export function orderAnomalies(orders, today = todayIso()) {
+  const soon = addDays(today, SOON_DAYS)
+  const res = { late: [], soon: [], noDate: [] }
+  orders.forEach(o => {
+    if (o.status === 'shipped') return
+    const td = shipDateOf(o)
+    if (!td) res.noDate.push(o)
+    else if (td < today) res.late.push(o)
+    else if (td <= soon && ['pending', 'packaging', 'scheduled'].includes(o.status)) res.soon.push(o)
+  })
+  const byDate = (a, b) => shipDateOf(a).localeCompare(shipDateOf(b))
+  res.late.sort(byDate); res.soon.sort(byDate)
+  res.total = res.late.length + res.soon.length + res.noDate.length
+  return res
+}
 
 export default function OrdersPage({ user }) {
   const [orders, setOrders] = useState([])
@@ -230,6 +257,20 @@ export default function OrdersPage({ user }) {
   }, {})
 
   const formatDate = d => d ? `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}` : ''
+  const tdOf = shipDateOf
+  const daysBetween = (a, b) => Math.round((new Date(b) - new Date(a)) / 86400000)
+
+  // ── 異常狀態：逾期未出貨／即將到期還沒備貨／未填出貨日（已完成出貨的不算） ──
+  const todayStr = todayIso()
+  const anomalies = useMemo(() => orderAnomalies(orders, todayStr), [orders, todayStr])
+
+  // 推進到下一關（各分頁卡片與異常狀態共用）
+  const openNext = o => {
+    const idx = STATES.indexOf(o.status)
+    if (idx < 0 || o.status === 'shipped') return
+    setStatusDate(formatDate(new Date()))
+    setStatusModal({ order: o, nextStatus: STATES[idx + 1], label: NEXT_ACTION[o.status] })
+  }
 
   const THEME = {
     pending:   { bg: '#fffbeb', header: '#f59e0b', accent: '#92400e', border: '#fde68a' },
@@ -237,8 +278,71 @@ export default function OrdersPage({ user }) {
     scheduled: { bg: '#f0fdf4', header: '#10b981', accent: '#065f46', border: '#a7f3d0' },
     prepared:  { bg: '#eff6ff', header: '#3b82f6', accent: '#1e3a8a', border: '#bfdbfe' },
     shipped:   { bg: '#f8fafc', header: '#64748b', accent: '#1e293b', border: '#e2e8f0' },
+    anomaly:   { bg: '#fff1f2', header: '#e11d48', accent: '#881337', border: '#fecdd3' },
   }
   const th = THEME[activeTab] || THEME.pending
+  // 推進狀態的視窗用「該筆訂單所在關卡」的顏色（從異常狀態按也一樣）
+  const mth = (statusModal && THEME[statusModal.order.status]) || th
+
+  // 異常狀態分頁內容（用函式呼叫，不寫成元件，避免重建）
+  const renderAnomaly = () => {
+    const match = o => !kw || (o.item_name || o.itemName || '').includes(kw) || (o.customer_name || o.customerName || '').includes(kw)
+    const sections = [
+      { key: 'late', icon: '🔴', title: '逾期未出貨', desc: '出貨日已過，還沒按「完成出貨」', color: '#be123c', list: anomalies.late.filter(match),
+        tag: o => `逾期 ${daysBetween(tdOf(o), todayStr)} 天` },
+      { key: 'soon', icon: '🟠', title: '即將到期、還沒備貨', desc: `${SOON_DAYS} 天內要出貨，但還在等待排程／包材準備／完成備貨`, color: '#c2410c', list: anomalies.soon.filter(match),
+        tag: o => { const d = daysBetween(todayStr, tdOf(o)); return d === 0 ? '今天要出貨' : `${d} 天後出貨` } },
+      { key: 'nodate', icon: '⚪', title: '未填出貨日', desc: '沒有指定出貨日，生產排程與出貨都排不進去', color: '#64748b', list: anomalies.noDate.filter(match),
+        tag: () => '未填出貨日' },
+    ]
+    if (anomalies.total === 0) return <div style={{ textAlign: 'center', padding: '60px 0', color: '#16a34a', fontWeight: 700, fontSize: 16 }}>✅ 目前沒有異常</div>
+    const btn = { background: '#fff', border: '1px solid #e2e8f0', borderRadius: 8, cursor: 'pointer', padding: '5px 10px', fontSize: 13, color: '#475569', fontFamily: 'inherit' }
+    return (
+      <div>
+        <div style={{ background: '#fff', border: '1px solid #fecdd3', borderRadius: 16, padding: '10px 14px', marginBottom: 14, fontSize: 14, color: '#881337', lineHeight: 1.7 }}>
+          <strong>生產部長異常通知：</strong>系統自動整理出貨有問題的客訂，「卡在」標示目前在哪一關、由哪一科負責。
+          已經出貨的按「確認出貨」完成；延期的按「✏️ 改出貨日」。處理好就會自動從這裡消失。
+        </div>
+        {sections.map(sec => sec.list.length > 0 && (
+          <div key={sec.key} style={{ marginBottom: 18 }}>
+            <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap', margin: '0 4px 8px' }}>
+              <span style={{ fontSize: 16, fontWeight: 900, color: sec.color }}>{sec.icon} {sec.title}（{sec.list.length}）</span>
+              <span style={{ fontSize: 12, color: '#94a3b8' }}>{sec.desc}</span>
+            </div>
+            <div className="op-cards">
+              {sec.list.map(o => {
+                const st = THEME[o.status] || THEME.pending
+                const box = getBoxCount(o)
+                return (
+                  <div key={o.id} style={{ background: '#fff', borderRadius: 16, border: '1px solid #fecdd3', borderLeft: `5px solid ${sec.color}`, padding: '12px 14px', marginBottom: 10, breakInside: 'avoid' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 8 }}>
+                      <div style={{ fontWeight: 900, fontSize: 16, color: '#1e293b', minWidth: 0 }}>{o.customer_name || o.customerName || '未知客戶'}</div>
+                      <div style={{ fontSize: 14, fontWeight: 900, color: sec.color, flexShrink: 0 }}>{sec.tag(o)}</div>
+                    </div>
+                    <div style={{ fontSize: 14, color: '#475569', marginTop: 2 }}>{o.item_name || o.itemName} · <strong>{o.quantity}</strong> 袋{box > 0 ? ` · ${box} 箱` : ''}</div>
+                    <span style={{ display: 'inline-block', marginTop: 6, fontSize: 12, fontWeight: 700, background: st.bg, color: st.accent, border: `1px solid ${st.border}`, borderRadius: 20, padding: '1px 8px' }}>
+                      卡在：{STAGE[o.status]?.tab || o.status}{STAGE[o.status]?.dept ? `（${STAGE[o.status].dept}）` : ''}
+                    </span>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 6, marginTop: 8, paddingTop: 8, borderTop: '1px dashed #f1f5f9', flexWrap: 'wrap' }}>
+                      <span style={{ fontSize: 13, color: '#64748b' }}>出貨日：{tdOf(o) || '未填'}{(o.scheduled_date || o.scheduledDate) ? ` · 排程：${o.scheduled_date || o.scheduledDate}` : ''}</span>
+                      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                        <button onClick={() => openEditForm(o)} style={btn}>✏️ 改出貨日</button>
+                        <button onClick={() => setActiveTab(o.status)} style={btn}>前往「{STAGE[o.status]?.tab}」</button>
+                        {NEXT_ACTION[o.status] && (
+                          <button onClick={() => openNext(o)} style={{ ...btn, background: st.header, color: '#fff', border: 'none', fontWeight: 700 }}>{NEXT_ACTION[o.status]} ›</button>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          </div>
+        ))}
+        {sections.every(s => s.list.length === 0) && <div style={{ textAlign: 'center', padding: '40px 0', color: '#94a3b8' }}>搜尋「{kw}」沒有符合的異常</div>}
+      </div>
+    )
+  }
 
   if (loading) return <div style={{ textAlign: 'center', padding: 40, color: '#94a3b8' }}>載入中...</div>
 
@@ -263,14 +367,19 @@ export default function OrdersPage({ user }) {
         .op-wrap { max-width: 1200px; margin: 0 auto; padding: 12px 16px; }
         .op-tabs { display: grid; grid-template-columns: repeat(3, 1fr); }
         .op-cards { column-gap: 16px; }
-        @media (min-width: 760px) { .op-tabs { grid-template-columns: repeat(5, 1fr); } }
+        @media (min-width: 760px) { .op-tabs { grid-template-columns: repeat(6, 1fr); } }
         @media (min-width: 900px) { .op-cards { columns: 2; } }
       `}</style>
       <div className="op-wrap">
         <div className="op-tabs" style={{ background: 'rgba(255,255,255,.5)', borderRadius: 16, padding: 4, marginBottom: 12, gap: 4 }}>
-          {STATES.map(s => [s, STAGE[s].tab, STAGE[s].dept]).map(([t, l, dept]) => (
-            <button key={t} onClick={() => setActiveTab(t)} style={{ padding: '8px 4px', borderRadius: 12, border: 'none', fontSize: 14, fontWeight: 700, lineHeight: 1.35, cursor: 'pointer', fontFamily: 'inherit', background: activeTab === t ? th.header : 'transparent', color: activeTab === t ? '#fff' : '#94a3b8' }}>
-              <div>{l}</div>
+          {[...STATES.map(s => [s, STAGE[s].tab, STAGE[s].dept]), [ANOMALY, '異常狀態', '生產部']].map(([t, l, dept]) => (
+            <button key={t} onClick={() => setActiveTab(t)} style={{ padding: '8px 4px', borderRadius: 12, border: 'none', fontSize: 14, fontWeight: 700, lineHeight: 1.35, cursor: 'pointer', fontFamily: 'inherit', background: activeTab === t ? th.header : 'transparent', color: activeTab === t ? '#fff' : (t === ANOMALY && anomalies.total > 0 ? '#e11d48' : '#94a3b8') }}>
+              <div>
+                {l}
+                {t === ANOMALY && anomalies.total > 0 && (
+                  <span style={{ marginLeft: 4, background: activeTab === t ? '#fff' : '#e11d48', color: activeTab === t ? '#e11d48' : '#fff', borderRadius: 10, padding: '0 6px', fontSize: 11, fontWeight: 900 }}>{anomalies.total}</span>
+                )}
+              </div>
               {dept && <div style={{ fontSize: 11, fontWeight: 500, opacity: 0.85 }}>({dept})</div>}
             </button>
           ))}
@@ -299,7 +408,7 @@ export default function OrdersPage({ user }) {
           </div>
         )}
 
-        {Object.keys(groupedByCustomer).length === 0
+        {activeTab === ANOMALY ? renderAnomaly() : Object.keys(groupedByCustomer).length === 0
             ? <div style={{ textAlign: 'center', padding: '60px 0', color: '#94a3b8', fontStyle: 'italic' }}>目前無資料</div>
             : <div className="op-cards">{Object.entries(groupedByCustomer).map(([parentName, group]) => {
               const allOrders = group.all || []
@@ -373,12 +482,7 @@ export default function OrdersPage({ user }) {
                           <button onClick={() => deleteOrder(o.id)} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 16, color: '#94a3b8', padding: '4px 6px' }}>🗑️</button>
                           <button onClick={() => changeStatus(o, -1)} disabled={o.status === 'pending'} style={{ background: '#fff', border: '1px solid #e2e8f0', borderRadius: 8, cursor: 'pointer', padding: '4px 8px', fontSize: 11, color: o.status === 'pending' ? '#e2e8f0' : '#475569' }}>退回上一狀態</button>
                           {NEXT_ACTION[o.status] && (
-                          <button onClick={() => {
-                            const idx = STATES.indexOf(o.status)
-                            if (idx < 0 || o.status === 'shipped') return
-                            setStatusDate(formatDate(new Date()))
-                            setStatusModal({ order: o, nextStatus: STATES[idx + 1], label: NEXT_ACTION[o.status] })
-                          }} style={{ background: th.header, color: '#fff', border: 'none', borderRadius: 8, cursor: 'pointer', padding: '6px 14px', fontWeight: 700, fontSize: 14 }}>
+                          <button onClick={() => openNext(o)} style={{ background: th.header, color: '#fff', border: 'none', borderRadius: 8, cursor: 'pointer', padding: '6px 14px', fontWeight: 700, fontSize: 14 }}>
                             {NEXT_ACTION[o.status]} ›
                           </button>
                           )}
@@ -433,7 +537,7 @@ export default function OrdersPage({ user }) {
               {statusModal.order.customer_name || statusModal.order.customerName} ・ {statusModal.order.item_name || statusModal.order.itemName}
             </div>
             {STAGE[statusModal.order.status]?.note ? (
-              <div style={{ fontSize: 14, color: th.accent, background: th.bg, borderRadius: 12, padding: '10px 12px', marginBottom: 16, lineHeight: 1.6 }}>
+              <div style={{ fontSize: 14, color: mth.accent, background: mth.bg, borderRadius: 12, padding: '10px 12px', marginBottom: 16, lineHeight: 1.6 }}>
                 {STAGE[statusModal.order.status].note}
               </div>
             ) : (
@@ -455,7 +559,7 @@ export default function OrdersPage({ user }) {
                 fetchOrders()
                 showToast(`${statusModal.label} ✅`)
                 setStatusModal(null)
-              }} style={{ flex: 2, padding: '11px', background: th.header, color: '#fff', border: 'none', borderRadius: 12, fontWeight: 900, cursor: 'pointer' }}>確認 {statusModal.label}</button>
+              }} style={{ flex: 2, padding: '11px', background: mth.header, color: '#fff', border: 'none', borderRadius: 12, fontWeight: 900, cursor: 'pointer' }}>確認 {statusModal.label}</button>
             </div>
           </div>
         </div>

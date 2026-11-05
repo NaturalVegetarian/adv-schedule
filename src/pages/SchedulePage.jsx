@@ -2,6 +2,7 @@ import { useState, useMemo, useEffect } from 'react'
 import { supabase } from '../lib/supabase'
 import { fmtDT, loadPage, loadLogs, savePageData, addLog, AdjustLog } from '../lib/pageSave'
 import { flavorLists, DEFAULT_PPB, DEFAULT_MAX_CAP, isoOf, parseIso, addDays, wdOf, mdOf, todayIso, toIso, WD } from '../lib/flavors'
+import { orderAnomalies, shipDateOf } from './OrdersPage'
 
 // ③ 生產排程（生產排程科）＝ Excel「3.生產排程表」＋「庫存量預估表」
 // 每日庫存 ＝ 前一天庫存 − 每日預估銷售量（含節日加乘）− 當天已確定銷售量 ＋ 當天入庫量
@@ -216,24 +217,27 @@ export default function SchedulePage() {
     return new Set(schData.filter(r => r.item && r.date && autoIn(r) >= first && autoIn(r) <= last).map(r => r.item))
   }, [schData, DATES])
 
-  // 客訂出貨清單：依出貨日列在最右欄；逾期／未定日期列在第一天
+  // 客訂異常（逾期未出貨／即將到期還沒備貨／未填出貨日）：規則跟「客訂管理 → 異常狀態（生產部）」同一套
+  const anomaly = useMemo(() => orderAnomalies(orders, today), [orders, today])
+
+  // 客訂出貨清單：只列今天以後、還沒出貨的客訂（依出貨日列在最右欄）
+  // 已過出貨日、未填出貨日的屬於異常，不再塞在第一天，改到客訂管理的「異常狀態」處理
   const orderInfo = useMemo(() => {
     const first = DATES[0]?.iso, last = DATES[DATES.length - 1]?.iso
+    const soonIds = new Set(anomaly.soon.map(o => o.id))
     const byIso = {}
-    let overdue = 0
     orders.forEach(o => {
+      const td = shipDateOf(o)
+      if (!td || td < today || td < first || td > last) return
       const name = o.item_name || o.itemName || ''
       const f = L.all.find(x => name.includes(x))
-      const td = toIso(o.target_date || o.targetDate)
-      let k, tag = ''
-      if (!td) { k = first; tag = '未定 ' }
-      else if (td < first) { k = first; tag = '逾期 '; overdue++ }
-      else if (td > last) return
-      else k = td
-      ;(byIso[k] = byIso[k] || []).push(`${tag}${o.customer_name || o.customerName || '未知客戶'} ${f || name} ${Number(o.quantity) || 0}${o.unit || '袋'}`)
+      ;(byIso[td] = byIso[td] || []).push({
+        text: `${o.customer_name || o.customerName || '未知客戶'} ${f || name} ${Number(o.quantity) || 0}${o.unit || '袋'}`,
+        warn: soonIds.has(o.id), // 快到出貨日但還沒備好貨 → 標紅
+      })
     })
-    return { byIso, overdue }
-  }, [orders, DATES, L])
+    return { byIso }
+  }, [orders, DATES, L, today, anomaly])
   const todayShip = orders.filter(o => toIso(o.target_date || o.targetDate) === today)
 
   // ── 排程輸入 ──
@@ -396,9 +400,14 @@ export default function SchedulePage() {
           ⚠ 庫存狀況的盤點日期是 <strong>{mdOf(invDate)}</strong>（{staleDays} 天前），預估從那天開始算。請成品倉庫管理科重新盤點後存檔，預估才會準。
         </div>
       )}
-      {orderInfo.overdue > 0 && (
-        <div style={{ background: '#fff7ed', border: '1px solid #fed7aa', borderRadius: 10, padding: '8px 12px', marginBottom: 10, fontSize: 14, color: '#7c2d12' }}>
-          <strong>⚠ 有 {orderInfo.overdue} 筆客訂已過出貨日、還沒按「完成出貨」</strong>，列在預估表最右欄第一天（橘字「逾期」），請到客訂管理確認狀態。
+      {anomaly.total > 0 && (
+        <div style={{ background: '#fff1f2', border: '1px solid #fecdd3', borderRadius: 10, padding: '8px 12px', marginBottom: 10, fontSize: 14, color: '#881337' }}>
+          <strong>⚠ 客訂有 {anomaly.total} 筆異常</strong>
+          （{[
+            anomaly.late.length > 0 && `逾期未出貨 ${anomaly.late.length}`,
+            anomaly.soon.length > 0 && `即將到期還沒備貨 ${anomaly.soon.length}`,
+            anomaly.noDate.length > 0 && `未填出貨日 ${anomaly.noDate.length}`,
+          ].filter(Boolean).join('、')}），請到「客訂管理 → 異常狀態（生產部）」查看處理。
         </div>
       )}
       {todayShip.length > 0 && (
@@ -620,7 +629,7 @@ export default function SchedulePage() {
                         )
                       })}
                       <td className="pf-cust">
-                        {(orderInfo.byIso[d.iso] || []).map((c, k) => <div key={k} style={{ color: c.startsWith('逾期 ') ? '#c2410c' : undefined }}>{c}</div>)}
+                        {(orderInfo.byIso[d.iso] || []).map((c, k) => <div key={k} style={c.warn ? { color: '#be123c', fontWeight: 700 } : undefined} title={c.warn ? '快到出貨日，還沒完成備貨' : undefined}>{c.warn ? '⚠ ' : ''}{c.text}</div>)}
                       </td>
                     </tr>
                   )
