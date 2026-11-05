@@ -98,6 +98,29 @@ function diffSch(prev, cur) {
 }
 const diffPpb = (p, c) => Object.keys({ ...p, ...c }).filter(f => Number(p[f]) !== Number(c[f])).map(f => `${f} 每桶產量 ${p[f] ?? '—'} → ${c[f]} 包`)
 
+// ── 客訂換算：客訂的「袋數 × 每袋重量」→ 庫存包數 ──
+// 1. 固定換算（先找指定口味、再找全部口味）：例 5250g 營業用 1 袋＝扣 6.5 包
+// 2. 表上沒有的重量：每袋重量 ÷ 庫存 1 包重量（大包 800g）
+const DEFAULT_CONV = { baseG: 800, rules: [{ f: '', g: 800, p: 1 }, { f: '', g: 400, p: 0.5 }, { f: '', g: 5250, p: 6.5 }] }
+const withRuleIds = c => ({ baseG: c.baseG ?? 800, rules: (c.rules || []).map(r => ({ id: r.id || uid(), f: r.f || '', g: String(r.g ?? ''), p: String(r.p ?? '') })) })
+const validRule = r => Number(r.g) > 0 && Number(r.p) > 0
+const normConv = c => ({ baseG: Number(c.baseG) || 800, rules: c.rules.filter(validRule).map(r => ({ f: r.f || '', g: Number(r.g), p: Number(r.p) })) })
+function diffConv(p, c) {
+  const out = [], a = normConv(p), b = normConv(c)
+  if (a.baseG !== b.baseG) out.push(`換算：庫存 1 包 ${a.baseG}g → ${b.baseG}g`)
+  const key = r => `${r.f || '全部口味'} 每袋${r.g}g`
+  const pm = Object.fromEntries(a.rules.map(r => [key(r), r.p]))
+  const cm = Object.fromEntries(b.rules.map(r => [key(r), r.p]))
+  Object.keys(cm).forEach(k => {
+    if (!(k in pm)) out.push(`換算新增：${k} ＝ ${cm[k]} 包`)
+    else if (pm[k] !== cm[k]) out.push(`換算修改：${k} ${pm[k]} → ${cm[k]} 包`)
+  })
+  Object.keys(pm).forEach(k => { if (!(k in cm)) out.push(`換算刪除：${k}（原 ${pm[k]} 包）`) })
+  return out
+}
+const fmtN = n => Number(n || 0).toLocaleString('zh-TW', { maximumFractionDigits: 2 })
+const cleanNum = v => String(v).replace(/[^\d.]/g, '').replace(/(\..*)\./g, '$1') // 只留數字和一個小數點（打 -200 會變 200）
+
 export default function SchedulePage() {
   const [schData, setSchData] = useState([])
   const [savedSch, setSavedSch] = useState([])
@@ -123,6 +146,9 @@ export default function SchedulePage() {
   const [linked, setLinked] = useState({ sales: null, inventory: null })
   const [showOrd, setShowOrd] = useState(true) // 客訂出貨清單展開／收合
   const [flash, setFlash] = useState(null) // 剛加入的扣除列，閃一下
+  const [conv, setConv] = useState(() => withRuleIds(DEFAULT_CONV)) // 客訂換算規則
+  const [savedConv, setSavedConv] = useState(() => withRuleIds(DEFAULT_CONV))
+  const [showConv, setShowConv] = useState(false)
 
   const showToast = msg => { setToast(msg); setTimeout(() => setToast(null), 3000) }
   const today = todayIso()
@@ -130,9 +156,10 @@ export default function SchedulePage() {
   // 讀取：排程、產量設定、調整紀錄、銷售計畫、庫存狀況
   useEffect(() => {
     (async () => {
-      const [s, i, y, lg] = await Promise.all([loadPage('sales'), loadPage('inventory'), loadPage('yield'), loadLogs('schedule')])
+      const [s, i, y, lg, cv] = await Promise.all([loadPage('sales'), loadPage('inventory'), loadPage('yield'), loadLogs('schedule'), loadPage('convert')])
       setLinked({ sales: s.data?.data || null, inventory: i.data?.data || null })
       if (y.data?.data) { const p = { ...DEFAULT_PPB, ...y.data.data }; setPpb(p); setSavedPpb(p) }
+      if (cv.data?.data) { const c = withRuleIds({ ...DEFAULT_CONV, ...cv.data.data }); setConv(c); setSavedConv(c) }
       setLogs(lg.data)
       const { data, error } = await supabase.from('adv_schedule_config').select('*').eq('id', 'default').maybeSingle()
       if (error) { setLoadError(error.message); return }
@@ -265,6 +292,19 @@ export default function SchedulePage() {
 
   // 客訂出貨清單（整合在生產排程表上方）：今天以後、還沒出貨的客訂，依出貨日排序
   // 已過出貨日、未填出貨日的屬於異常，到客訂管理的「異常狀態」處理
+  // 客訂袋數 → 庫存包數
+  const convOf = useMemo(() => {
+    const base = Number(conv.baseG) || 800
+    const rules = conv.rules.filter(validRule)
+    return (o, f) => {
+      const bags = Number(o.quantity) || 0
+      const g = Number(o.weight_per_bag) || 5250 // 跟客訂管理一樣：沒填就是 5250g
+      const hit = rules.find(r => r.f && r.f === f && Number(r.g) === g) || rules.find(r => !r.f && Number(r.g) === g)
+      const per = hit ? Number(hit.p) : g / base
+      return { bags, g, per, packs: Math.round(bags * per * 100) / 100, how: hit ? `固定換算：每袋 ${g}g＝${fmtN(per)} 包` : `自動換算：${g}g ÷ ${base}g＝${fmtN(per)} 包` }
+    }
+  }, [conv])
+
   const orderList = useMemo(() => {
     const soonIds = new Set(anomaly.soon.map(o => o.id))
     const used = {} // 已經扣過庫存的客訂 → 對應的扣除列
@@ -275,20 +315,24 @@ export default function SchedulePage() {
       .sort((a, b) => a.td.localeCompare(b.td))
       .map(({ o, td }) => {
         const name = o.item_name || o.itemName || ''
-        return { o, td, name, f: L.all.find(x => name.includes(x)) || '', warn: soonIds.has(o.id), row: used[o.id] || null }
+        const f = L.all.find(x => name.includes(x)) || ''
+        return { o, td, name, f, cv: convOf(o, f), warn: soonIds.has(o.id), row: used[o.id] || null }
       })
-  }, [orders, anomaly, schData, today, L])
+  }, [orders, anomaly, schData, today, L, convOf])
   const ordPending = orderList.filter(x => !x.row).length
   const todayShip = orders.filter(o => toIso(o.target_date || o.targetDate) === today)
 
-  // 客訂 → 加一列扣除（日期＝出貨日、包數＝訂單數量，都可以再改）
+  // 客訂 → 加一列扣除（日期＝出貨日、包數＝換算後的包數，都可以再改）
   const deductOrder = x => {
     if (x.row) return
-    const r = { id: uid(), kind: 'out', date: x.td, item: x.f, qty: String(Number(x.o.quantity) || 0), note: x.o.customer_name || x.o.customerName || '', orderId: x.o.id, barrels: 0 }
+    const cust = x.o.customer_name || x.o.customerName || ''
+    const r = { id: uid(), kind: 'out', date: x.td, item: x.f, qty: String(x.cv.packs), note: `${cust} ${x.cv.bags}袋×${x.cv.g}g`, orderId: x.o.id, barrels: 0 }
     setSchData(rows => sortRows([...rows, r]))
     setFlash(r.id); setTimeout(() => setFlash(f => (f === r.id ? null : f)), 1800)
-    showToast(`已加入扣除：${mdOf(r.date)} ${r.item || '（請選口味）'} −${r.qty} 包，記得存檔`)
+    showToast(`已加入扣除：${mdOf(r.date)} ${r.item || '（請選口味）'} −${fmtN(x.cv.packs)} 包（${x.cv.bags}袋×${x.cv.g}g），記得存檔`)
   }
+  // 換算規則編輯
+  const updRule = (id, k, v) => setConv(c => ({ ...c, rules: c.rules.map(r => (r.id === id ? { ...r, [k]: k === 'f' ? v : cleanNum(v) } : r)) }))
   const addOut = () => {
     const r = { id: uid(), kind: 'out', date: today, item: '', qty: '', note: '', barrels: 0 } // barrels: 0 → 其他程式讀到也不會當成生產
     setSchData(d => [...d, r])
@@ -317,7 +361,8 @@ export default function SchedulePage() {
   // ── 存檔 ──
   const schChanges = useMemo(() => diffSch(savedSch, schData), [savedSch, schData])
   const ppbChanges = useMemo(() => diffPpb(savedPpb, ppb), [savedPpb, ppb])
-  const dirty = loaded && (schChanges.length > 0 || ppbChanges.length > 0)
+  const convChanges = useMemo(() => diffConv(savedConv, conv), [savedConv, conv])
+  const dirty = loaded && (schChanges.length > 0 || ppbChanges.length > 0 || convChanges.length > 0)
   const save = async () => {
     if (!loaded) { alert(loadError ? '排程資料讀取失敗，無法存檔：' + loadError : '排程資料載入中，請稍候再存檔'); return }
     const sorted = sortRows(schData)
@@ -331,10 +376,15 @@ export default function SchedulePage() {
       const r = await savePageData('yield', ppb)
       if (r.error) { setSaving(false); alert('產量設定儲存失敗：' + r.error.message); return }
     }
-    const ch = [...diffSch(savedSch, sorted), ...ppbChanges]
+    if (convChanges.length) {
+      const r = await savePageData('convert', normConv(conv))
+      if (r.error) { setSaving(false); alert('換算規則儲存失敗：' + r.error.message); return }
+    }
+    const ch = [...diffSch(savedSch, sorted), ...ppbChanges, ...convChanges]
     if (ch.length) await addLog('schedule', ch)
     setSaving(false)
-    setSchData(sorted); setSavedSch(sorted); setSavedPpb(ppb); setLastSaved(now)
+    const cleanConv = withRuleIds(normConv(conv)) // 存檔後拿掉沒填完整的換算列
+    setSchData(sorted); setSavedSch(sorted); setSavedPpb(ppb); setConv(cleanConv); setSavedConv(cleanConv); setLastSaved(now)
     if (ch.length) setLogs(l => [{ id: 'new-' + now, created_at: now, changes: ch }, ...l].slice(0, 50))
     showToast('排程已儲存 ✅')
   }
@@ -415,20 +465,31 @@ export default function SchedulePage() {
         .ps-ord { border: 1px solid #fde68a; background: #fffbeb; border-radius: 10px; margin-bottom: 10px; overflow: hidden; }
         .ps-ord-h { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; width: 100%; background: none; border: none; padding: 8px 10px; cursor: pointer; font-family: inherit; font-size: 14px; color: #78350f; text-align: left; }
         .ps-ord-list { max-height: 232px; overflow: auto; border-top: 1px solid #fde68a; background: #fff; }
-        .ps-ord-row { display: grid; grid-template-columns: 82px minmax(0, 1fr) 44px 64px 62px 104px; align-items: center; gap: 6px; padding: 5px 10px; font-size: 13px; border-bottom: 1px dashed #fde68a; }
+        .ps-ord-row { display: grid; grid-template-columns: 82px minmax(0, 1fr) 40px 112px 62px minmax(96px, auto); align-items: center; gap: 6px; padding: 5px 10px; font-size: 13px; border-bottom: 1px dashed #fde68a; }
         .ps-ord-row .d { color: #475569; font-weight: 700; white-space: nowrap; }
         .ps-ord-row .c { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #1e293b; }
         .ps-ord-row .f { font-weight: 800; color: #334155; }
-        .ps-ord-row .q { text-align: right; font-weight: 700; white-space: nowrap; }
+        .ps-ord-row .q { display: flex; flex-direction: column; align-items: flex-end; line-height: 1.25; white-space: nowrap; cursor: help; }
+        .ps-ord-row .q1 { font-size: 11px; color: #64748b; }
+        .ps-ord-row .q2 { font-size: 13px; font-weight: 800; color: #1e293b; }
         .ps-ord-row .s { font-size: 11px; color: #64748b; background: #f1f5f9; border-radius: 10px; padding: 1px 4px; text-align: center; white-space: nowrap; }
         .ps-ord-row.warn .d, .ps-ord-row.warn .c { color: #be123c; font-weight: 800; }
         .ps-ord-btn { justify-self: end; font-size: 13px; font-weight: 800; color: #fff; background: #dc2626; border: none; border-radius: 7px; padding: 4px 9px; cursor: pointer; font-family: inherit; white-space: nowrap; }
-        .ps-ord-done { justify-self: end; font-size: 12px; color: #047857; font-weight: 700; white-space: nowrap; }
+        .ps-ord-done { justify-self: end; font-size: 12px; color: #047857; font-weight: 700; white-space: nowrap; display: flex; flex-direction: column; align-items: flex-end; gap: 2px; }
+        .ps-ord-done.off { color: #b45309; }
+        .ps-ord-fix { font-size: 11px; font-weight: 700; color: #fff; background: #f59e0b; border: none; border-radius: 6px; padding: 2px 7px; cursor: pointer; font-family: inherit; white-space: nowrap; }
+        .ps-conv-bar { border-top: 1px solid #fde68a; padding: 3px 10px; }
+        .ps-conv-bar button { background: none; border: none; color: #92400e; font-size: 12px; font-weight: 700; cursor: pointer; padding: 3px 0; font-family: inherit; }
+        .ps-conv { border-top: 1px dashed #fde68a; padding: 8px 10px 10px; font-size: 12px; color: #475569; background: #fffdf5; line-height: 1.6; }
+        .ps-conv-row { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; margin-bottom: 4px; font-size: 13px; }
         .ps-ord-tip { font-size: 12px; color: #92400e; padding: 6px 10px 8px; line-height: 1.6; border-top: 1px solid #fde68a; }
         @media (max-width: 560px) {
-          .ps-ord-row { grid-template-columns: 80px minmax(0, 1fr) 40px 60px; }
-          .ps-ord-row .s { display: none; }
-          .ps-ord-row .ps-ord-btn, .ps-ord-row .ps-ord-done { grid-column: 1 / -1; }
+          .ps-ord-row { grid-template-columns: minmax(0, 1fr) 40px 112px; grid-template-areas: "d f q" "c c a"; row-gap: 2px; }
+          .ps-ord-row .d { grid-area: d; } .ps-ord-row .f { grid-area: f; } .ps-ord-row .q { grid-area: q; }
+          .ps-ord-row .c { grid-area: c; } .ps-ord-row .s { display: none; }
+          .ps-ord-row .ps-ord-btn, .ps-ord-row .ps-ord-done { grid-area: a; }
+          .ps-conv-row select { width: 86px !important; }
+          .ps-conv-row input { width: 56px !important; }
         }
         .pf-scroll { overflow: auto; max-height: 560px; border: 1px solid #e2e8f0; border-radius: 8px; }
         .pf { border-collapse: separate; border-spacing: 0; font-size: 12px; min-width: 100%; }
@@ -523,25 +584,80 @@ export default function SchedulePage() {
                 <div className="ps-ord-list">
                   {orderList.map(x => {
                     const cust = x.o.customer_name || x.o.customerName || '未知客戶'
+                    const done = x.row ? Number(x.row.qty) || 0 : 0
+                    const off = x.row && Math.abs(done - x.cv.packs) > 0.005 // 已扣的包數跟換算不同
                     return (
                       <div key={x.o.id} className={`ps-ord-row${x.warn ? ' warn' : ''}`} title={x.warn ? '快到出貨日，還沒完成備貨' : `${cust}｜${x.name}`}>
                         <span className="d">{mdOf(x.td)}（{wdOf(x.td).slice(1)}）</span>
                         <span className="c">{x.warn ? '⚠ ' : ''}{cust}</span>
                         <span className="f">{x.f || '—'}</span>
-                        <span className="q">{Number(x.o.quantity) || 0}{x.o.unit || '袋'}</span>
+                        <span className="q" title={x.cv.how}>
+                          <span className="q1">{fmtN(x.cv.bags)}袋 × {x.cv.g}g</span>
+                          <span className="q2">＝ {fmtN(x.cv.packs)} 包</span>
+                        </span>
                         <span className="s">{ORDER_STAGE[x.o.status] || ''}</span>
                         {x.row
-                          ? <span className="ps-ord-done">✓ 已扣 −{Number(x.row.qty) || 0} 包{x.row.date !== x.td ? `（${mdOf(x.row.date)}）` : ''}</span>
-                          : <button className="ps-ord-btn" onClick={() => deductOrder(x)}>− 扣庫存</button>}
+                          ? (
+                            <span className={`ps-ord-done${off ? ' off' : ''}`}>
+                              ✓ 已扣 −{fmtN(done)} 包{x.row.date !== x.td ? `（${mdOf(x.row.date)}）` : ''}
+                              {off && (
+                                <button className="ps-ord-fix" onClick={() => updateSch(x.row.id, 'qty', String(x.cv.packs))} title={x.cv.how}>
+                                  換算是 {fmtN(x.cv.packs)} 包，改成這個
+                                </button>
+                              )}
+                            </span>
+                          )
+                          : <button className="ps-ord-btn" onClick={() => deductOrder(x)} title={x.cv.how}>− 扣 {fmtN(x.cv.packs)} 包</button>}
                       </div>
                     )
                   })}
                 </div>
                 <div className="ps-ord-tip">
-                  按「− 扣庫存」會在下面排程表加一列扣除（日期＝出貨日、包數＝訂單數量，都可以再改），存檔後預估表當天就會扣掉。
+                  按「− 扣 N 包」會在下面排程表加一列扣除（日期＝出貨日、包數＝袋數換算成庫存包數，都可以再改），存檔後預估表當天就會扣掉。
                   已過出貨日、未填出貨日的客訂請到「客訂管理 → 異常狀態」處理。
                 </div>
               </>
+            )}
+            {showOrd && (
+              <div className="ps-conv-bar">
+                <button onClick={() => setShowConv(v => !v)} aria-expanded={showConv}>
+                  ⚙ 袋 → 包 換算規則（1 包＝{Number(conv.baseG) || 800}g）{showConv ? ' ▲' : ' ▼'}
+                </button>
+              </div>
+            )}
+            {showOrd && showConv && (
+              <div className="ps-conv">
+                <div style={{ marginBottom: 6 }}>
+                  扣除包數 ＝ 客訂袋數 × 每袋換算包數。每袋重量看客訂管理的「每袋重量(g)」。
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', marginBottom: 8 }}>
+                  <strong>庫存 1 包 ＝</strong>
+                  <input className="inp" type="text" inputMode="numeric" value={conv.baseG} onChange={e => setConv(c => ({ ...c, baseG: cleanNum(e.target.value) }))}
+                    style={{ width: 70, fontSize: 13, textAlign: 'right' }} aria-label="庫存一包重量" /> g（大包）
+                </div>
+                <div style={{ fontWeight: 700, marginBottom: 4 }}>固定換算（有設定的重量優先用這裡；指定口味的又比「全部口味」優先）</div>
+                {conv.rules.map(r => (
+                  <div key={r.id} className="ps-conv-row">
+                    <select className="inp" value={r.f} onChange={e => updRule(r.id, 'f', e.target.value)} style={{ width: 104, fontSize: 13 }} aria-label="換算適用口味">
+                      <option value="">全部口味</option>
+                      {L.all.map(f => <option key={f} value={f}>{f}</option>)}
+                    </select>
+                    <span>每袋</span>
+                    <input className="inp" type="text" inputMode="numeric" value={r.g} onChange={e => updRule(r.id, 'g', e.target.value)} style={{ width: 70, fontSize: 13, textAlign: 'right' }} aria-label="每袋重量" />
+                    <span>g ＝ 扣</span>
+                    <input className="inp" type="text" inputMode="decimal" value={r.p} onChange={e => updRule(r.id, 'p', e.target.value)} style={{ width: 62, fontSize: 13, textAlign: 'right' }} aria-label="換算包數" />
+                    <span>包</span>
+                    <button onClick={() => setConv(c => ({ ...c, rules: c.rules.filter(x => x.id !== r.id) }))} title="刪除這條"
+                      style={{ color: '#94a3b8', background: 'none', border: 'none', cursor: 'pointer', fontSize: 15 }}>×</button>
+                  </div>
+                ))}
+                <button onClick={() => setConv(c => ({ ...c, rules: [...c.rules, { id: uid(), f: '', g: '', p: '' }] }))}
+                  style={{ fontSize: 13, color: '#92400e', background: 'none', border: '1px dashed #fcd34d', borderRadius: 7, padding: '4px 12px', cursor: 'pointer', marginTop: 2 }}>＋ 新增規格</button>
+                <div style={{ marginTop: 8, color: '#92400e' }}>
+                  表上沒有的重量自動換算：每袋重量 ÷ {Number(conv.baseG) || 800}g（例：300g＝{fmtN(300 / (Number(conv.baseG) || 800))} 包、600g＝{fmtN(600 / (Number(conv.baseG) || 800))} 包）。
+                  植物肉這類 1 包不是 {Number(conv.baseG) || 800}g 的，選該口味另外設定（例：植物肉 每袋 600g＝扣 1 包）。修改後按上方 💾 存檔。
+                </div>
+              </div>
             )}
           </div>
 
@@ -598,8 +714,8 @@ export default function SchedulePage() {
                       <td style={{ textAlign: 'center' }}><span className="ps-outchip">− 扣除</span></td>
                       <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
                         <span style={{ color: '#b91c1c', fontWeight: 900, marginRight: 2 }}>−</span>
-                        <input type="number" min="0" inputMode="numeric" className="inp" value={r.qty ?? ''} placeholder="包數"
-                          onChange={e => updateSch(r.id, 'qty', e.target.value === '' ? '' : String(Math.abs(Number(e.target.value)) || 0))}
+                        <input type="text" inputMode="decimal" className="inp" value={r.qty ?? ''} placeholder="包數"
+                          onChange={e => updateSch(r.id, 'qty', cleanNum(e.target.value))}
                           style={{ width: 74, fontSize: 13, textAlign: 'right', color: '#b91c1c', fontWeight: 700 }} aria-label="扣除包數" />
                       </td>
                       <td>
@@ -658,7 +774,7 @@ export default function SchedulePage() {
             )}
             <span style={{ fontSize: 13, color: '#64748b' }}>
               合計 生產 <strong style={{ color: '#047857' }}>{tot > 0 ? `+${tot.toLocaleString()} 包` : '—'}</strong>
-              {outTot > 0 && <>　扣除 <strong style={{ color: '#b91c1c' }}>−{outTot.toLocaleString()} 包</strong></>}
+              {outTot > 0 && <>　扣除 <strong style={{ color: '#b91c1c' }}>−{fmtN(outTot)} 包</strong></>}
             </span>
           </div>
 
@@ -769,15 +885,15 @@ export default function SchedulePage() {
                         const bar = st === 'ok' || st === 'high' ? barStyle(levelOf(c.raw, mn, mx), colors[f]) : undefined
                         const tip = [`${f} ${d.lb}：${c.v.toLocaleString()} 包（最低 ${Math.round(mn).toLocaleString()}／上限 ${mx ? Math.round(mx).toLocaleString() : '—'}）`,
                           c.add > 0 && `入庫 +${Math.round(c.add).toLocaleString()}`,
-                          c.ot > 0 && `排程表扣除 −${Math.round(c.ot).toLocaleString()}`,
-                          c.cs > 0 && `已確定銷售 −${Math.round(c.cs).toLocaleString()}`].filter(Boolean).join('\n')
+                          c.ot > 0 && `排程表扣除 −${fmtN(c.ot)}`,
+                          c.cs > 0 && `已確定銷售 −${fmtN(c.cs)}`].filter(Boolean).join('\n')
                         return (
                           <td key={f} className={`pf-c pf-${st}${c.add ? ' pf-in' : ''}${i === L.main.length ? ' pf-sep' : ''}`} style={bar} title={tip}>
                             <div className="pf-n">{c.v.toLocaleString()}</div>
                             {(c.add > 0 || minus > 0) && (
                               <div className="pf-x">
                                 {c.add > 0 && <span className="pf-plus">+{Math.round(c.add).toLocaleString()}</span>}
-                                {minus > 0 && <span className="pf-minus">−{Math.round(minus).toLocaleString()}</span>}
+                                {minus > 0 && <span className="pf-minus">−{fmtN(Math.round(minus * 10) / 10)}</span>}
                               </div>
                             )}
                           </td>
