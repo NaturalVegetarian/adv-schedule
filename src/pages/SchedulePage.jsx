@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect, useRef } from 'react'
+import { useState, useMemo, useEffect, useRef, Fragment } from 'react'
 import { supabase } from '../lib/supabase'
 import { fmtDT, loadPage, loadLogs, savePageData, addLog, AdjustLog } from '../lib/pageSave'
 import { flavorLists, DEFAULT_PPB, DEFAULT_MAX_CAP, isoOf, parseIso, addDays, wdOf, mdOf, todayIso, toIso, WD } from '../lib/flavors'
@@ -84,16 +84,30 @@ function diffSch(prev, cur) {
   const changed = (o, r) => isOut(r)
     ? o.date !== r.date || o.item !== r.item || Number(o.qty) !== Number(r.qty) || (o.note || '') !== (r.note || '')
     : o.date !== r.date || o.item !== r.item || Number(o.barrels) !== Number(r.barrels) || (o.inDate || '') !== (r.inDate || '')
+  // 順便包（生產那天順便要包的其他品項）
+  const alsoDiff = (o, r) => {
+    const at = `${day(r.date)} ${r.item}`
+    const om = Object.fromEntries((o?.also || []).map(a => [a.id, a]))
+    const rm = Object.fromEntries((r.also || []).map(a => [a.id, a]))
+    ;(r.also || []).forEach(a => {
+      const p = om[a.id]
+      if (!p) out.push(`新增順便包 ${at}：${alsoTxt(a)}`)
+      else if (alsoTxt(p) !== alsoTxt(a)) out.push(`修改順便包 ${at}：${alsoTxt(p)} → ${alsoTxt(a)}`)
+    })
+    ;(o?.also || []).forEach(p => { if (!rm[p.id]) out.push(`刪除順便包 ${at}：${alsoTxt(p)}`) })
+  }
+  const withAlso = r => (r.also?.length ? `（含順便包：${r.also.map(alsoTxt).join('、')}）` : '')
   const pm = Object.fromEntries(prev.map(r => [r.id, r]))
   const cm = Object.fromEntries(cur.map(r => [r.id, r]))
   cur.forEach(r => {
     const o = pm[r.id]
-    if (!r.item) { if (o?.item) out.push(`刪除${kind(o)} ${d(o)}`); return }
-    if (!o || !o.item) { out.push(`新增${kind(r)} ${d(r)}`); return }
+    if (!r.item) { if (o?.item) out.push(`刪除${kind(o)} ${d(o)}${withAlso(o)}`); return }
+    if (!o || !o.item) { out.push(`新增${kind(r)} ${d(r)}`); if (!isOut(r)) alsoDiff(null, r); return }
     if (changed(o, r))
       out.push(`修改${kind(r)} ${d(o)} → ${d(r)}${!isOut(r) && r.inDate ? `（入庫 ${mdOf(r.inDate)}）` : ''}`)
+    if (!isOut(r)) alsoDiff(o, r)
   })
-  prev.forEach(o => { if (!cm[o.id] && o.item) out.push(`刪除${kind(o)} ${d(o)}`) })
+  prev.forEach(o => { if (!cm[o.id] && o.item) out.push(`刪除${kind(o)} ${d(o)}${withAlso(o)}`) })
   return out
 }
 const diffPpb = (p, c) => Object.keys({ ...p, ...c }).filter(f => Number(p[f]) !== Number(c[f])).map(f => `${f} 每桶產量 ${p[f] ?? '—'} → ${c[f]} 包`)
@@ -120,6 +134,11 @@ function diffConv(p, c) {
 }
 const fmtN = n => Number(n || 0).toLocaleString('zh-TW', { maximumFractionDigits: 2 })
 const cleanNum = v => String(v).replace(/[^\d.]/g, '').replace(/(\..*)\./g, '$1') // 只留數字和一個小數點（打 -200 會變 200）
+// 順便包：生產那天順便要包的其他品項（只記在排程和 Google 日曆上，不會扣庫存）
+const ALSO_UNITS = ['袋', '包', '箱']
+const alsoShort = a => `${a.item} ${fmtN(a.qty)}${a.unit || '袋'}`
+const alsoTxt = a => `${alsoShort(a)}${a.g ? `×${a.g}g` : ''}${a.note ? `（${a.note}）` : ''}`
+const EMPTY_ALSO = { item: '', qty: '', unit: '袋', note: '' }
 
 export default function SchedulePage() {
   const [schData, setSchData] = useState([])
@@ -147,6 +166,8 @@ export default function SchedulePage() {
   const [showOrd, setShowOrd] = useState(true) // 客訂出貨清單展開／收合
   const [flash, setFlash] = useState(null) // 剛加入的扣除列，閃一下
   const [undo, setUndo] = useState(null) // 剛刪掉的列（可以復原）
+  const [alsoOpen, setAlsoOpen] = useState(null) // 正在加「順便包」的排程列 id
+  const [alsoDraft, setAlsoDraft] = useState(EMPTY_ALSO)
   const undoTimer = useRef(null)
   useEffect(() => () => clearTimeout(undoTimer.current), [])
   const [conv, setConv] = useState(() => withRuleIds(DEFAULT_CONV)) // 客訂換算規則
@@ -347,6 +368,27 @@ export default function SchedulePage() {
 
   // ── 排程輸入 ──
   const updateSch = (id, k, v) => setSchData(rows => rows.map(r => r.id === id ? { ...r, [k]: v } : r))
+
+  // ── 順便包：生產那天順便要包的其他品項（客訂或自己填），會一起寫進 Google 日曆 ──
+  const setAlso = (id, fn) => setSchData(rows => rows.map(r => (r.id === id ? { ...r, also: fn(r.also || []) } : r)))
+  const openAlso = id => { setAlsoOpen(id); setAlsoDraft(EMPTY_ALSO) }
+  const addAlsoDraft = r => {
+    const d = alsoDraft
+    if (!d.item.trim() || !(Number(d.qty) > 0)) { showToast('請填品項和數量'); return }
+    setAlso(r.id, l => [...l, { id: uid(), item: d.item.trim(), qty: Number(d.qty), unit: d.unit, note: d.note.trim() }])
+    setAlsoDraft({ ...EMPTY_ALSO, unit: d.unit })
+  }
+  const addAlsoOrder = (r, oid) => {
+    const x = orderList.find(y => String(y.o.id) === oid); if (!x) return
+    const cust = x.o.customer_name || x.o.customerName || ''
+    setAlso(r.id, l => [...l, { id: uid(), item: x.f || x.name, qty: x.cv.bags, unit: '袋', g: x.cv.g, note: cust, orderId: x.o.id }])
+  }
+  const ordById = useMemo(() => Object.fromEntries(orderList.map(x => [x.o.id, x])), [orderList])
+  const alsoWhere = useMemo(() => { // 客訂 → 已經排在哪幾天順便包
+    const m = {}
+    schData.forEach(r => (r.also || []).forEach(a => { if (a.orderId) (m[a.orderId] = m[a.orderId] || []).push(r.date) }))
+    return m
+  }, [schData])
   const generate = () => {
     const from = parseIso(gen.from), to = parseIso(gen.to)
     if (!from || !to || to < from) { showToast('請選開始與結束日期'); return }
@@ -366,7 +408,7 @@ export default function SchedulePage() {
   const rowLabel = r => {
     const d = r.date ? `${mdOf(r.date)}（${wdOf(r.date).slice(1)}）` : '未定日期'
     if (!r.item) return `${d} 空白列`
-    return isOut(r) ? `${d} ${r.item} 扣除 −${fmtN(r.qty)} 包` : `${d} ${r.item} ${r.barrels} 桶`
+    return isOut(r) ? `${d} ${r.item} 扣除 −${fmtN(r.qty)} 包` : `${d} ${r.item} ${r.barrels} 桶${r.also?.length ? `（含順便包 ${r.also.length} 項）` : ''}`
   }
   const delRow = r => {
     const index = schData.findIndex(x => x.id === r.id)
@@ -467,8 +509,12 @@ export default function SchedulePage() {
     const e = new Date(s.getFullYear(), s.getMonth(), s.getDate() + 1)
     const fmt = x => isoOf(x).replace(/-/g, '')
     const pk = (Number(ppb[r.item]) || 0) * (Number(r.barrels) || 0)
-    const title = encodeURIComponent(`生產排程：${r.item} ${r.barrels}桶（入庫 ${mdOf(autoIn(r))}）`)
-    return `https://calendar.google.com/calendar/r/eventedit?text=${title}&dates=${fmt(s)}/${fmt(e)}&details=${encodeURIComponent(`品項：${r.item}\n桶數：${r.barrels}\n包數：${pk}包\n入庫日：${mdOf(autoIn(r))}`)}`
+    const also = r.also || []
+    const short = also.slice(0, 3).map(alsoShort).join('、') + (also.length > 3 ? ` 等 ${also.length} 項` : '')
+    const title = `生產排程：${r.item} ${r.barrels}桶（入庫 ${mdOf(autoIn(r))}）${also.length ? `｜順便包：${short}` : ''}`
+    const details = `品項：${r.item}\n桶數：${r.barrels}\n包數：${pk}包\n入庫日：${mdOf(autoIn(r))}`
+      + (also.length ? `\n\n順便包：\n${also.map(a => `• ${alsoTxt(a)}`).join('\n')}` : '')
+    return `https://calendar.google.com/calendar/r/eventedit?text=${encodeURIComponent(title)}&dates=${fmt(s)}/${fmt(e)}&details=${encodeURIComponent(details)}`
   }
 
   // 預估期間內：哪個口味從哪天開始缺貨／低於最低庫存
@@ -499,6 +545,18 @@ export default function SchedulePage() {
         .ps-del:hover, .ps-del:focus-visible { opacity: 1; background: #fee2e2; }
         .ps-undo { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 8px; background: #1e293b; color: #fff; border-radius: 8px; padding: 7px 12px; font-size: 13px; }
         .ps-undo button { background: #fff; color: #1e293b; border: none; border-radius: 6px; padding: 3px 12px; font-weight: 800; cursor: pointer; font-family: inherit; }
+        .ps-also-btn { display: block; margin: 1px 0 0 auto; font-size: 11px; font-weight: 700; color: #b45309; background: none; border: none; padding: 0; cursor: pointer; white-space: nowrap; font-family: inherit; }
+        .ps-also-btn:hover { text-decoration: underline; }
+        .ps-tbl .ps-also-row td { background: #fffbeb; padding-top: 4px !important; padding-bottom: 8px !important; }
+        .ps-also { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 13px; }
+        .ps-also-h { font-size: 12px; font-weight: 800; color: #92400e; white-space: nowrap; }
+        .ps-also-chip { display: inline-flex; align-items: center; gap: 4px; background: #fff; border: 1px solid #fcd34d; border-radius: 999px; padding: 2px 2px 2px 10px; color: #78350f; font-weight: 600; }
+        .ps-also-chip em { font-style: normal; font-size: 11px; font-weight: 700; color: #b45309; background: #fef3c7; border-radius: 4px; padding: 0 5px; white-space: nowrap; }
+        .ps-also-chip button { border: none; background: none; color: #94a3b8; cursor: pointer; font-size: 15px; line-height: 1; padding: 0 6px; border-radius: 999px; }
+        .ps-also-chip button:hover { color: #b91c1c; background: #fee2e2; }
+        .ps-also-more { font-size: 12px; font-weight: 700; color: #b45309; background: #fff; border: 1px dashed #fcd34d; border-radius: 999px; padding: 3px 10px; cursor: pointer; font-family: inherit; }
+        .ps-also-form { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 6px; padding: 8px; background: #fff; border: 1px dashed #fcd34d; border-radius: 8px; font-size: 12px; color: #92400e; }
+        .ps-also-form .inp { font-size: 13px; }
         .ps-blank td { background: #fffbeb; }
         .ps-outchip { display: inline-block; font-size: 12px; font-weight: 800; color: #b91c1c; background: #fee2e2; border: 1px solid #fecaca; border-radius: 6px; padding: 1px 8px; white-space: nowrap; }
         .ps-flash td { animation: psflash 1.8s ease-out; }
@@ -785,8 +843,13 @@ export default function SchedulePage() {
                   const pk = r.item ? (Number(ppb[r.item]) || 0) * (Number(r.barrels) || 0) : 0
                   const gcLink = makeGoogleCalLink(r)
                   const inAuto = !r.inDate
+                  const also = r.also || []
+                  const showAlso = r.item && (also.length > 0 || alsoOpen === r.id)
+                  // 可以從客訂加入的：還沒包好的客訂（已經在這列的不重複列出）
+                  const ordOpts = alsoOpen === r.id ? orderList.filter(x => !x.packed && !also.some(a => a.orderId === x.o.id)) : []
                   return (
-                    <tr key={r.id} className={r.item ? '' : 'ps-blank'}>
+                    <Fragment key={r.id}>
+                    <tr className={r.item ? '' : 'ps-blank'}>
                       {delCell}
                       <td style={{ whiteSpace: 'nowrap' }}>
                         <input type="date" className="inp" value={r.date || ''} onChange={e => updateSch(r.id, 'date', e.target.value)} style={{ width: 132, fontSize: 13 }} aria-label="生產日期" />
@@ -802,7 +865,12 @@ export default function SchedulePage() {
                             style={{ width: 24, height: 24, borderRadius: '50%', border: '1px solid #e2e8f0', background: '#fff', fontSize: 14, cursor: 'pointer', lineHeight: 1 }} aria-label="加一桶">＋</button>
                         </div>
                       </td>
-                      <td style={{ textAlign: 'right', fontWeight: 700 }}>{pk > 0 ? pk.toLocaleString() : '—'}</td>
+                      <td style={{ textAlign: 'right', fontWeight: 700 }}>
+                        {pk > 0 ? pk.toLocaleString() : '—'}
+                        {r.item && !also.length && alsoOpen !== r.id && (
+                          <button className="ps-also-btn" onClick={() => openAlso(r.id)} title="生產這天順便要包的其他品項（按 📅 會一起寫進 Google 日曆）">＋順便包</button>
+                        )}
+                      </td>
                       <td style={{ whiteSpace: 'nowrap' }}>
                         <input type="date" className="inp" value={r.date ? autoIn(r) : ''} onChange={e => updateSch(r.id, 'inDate', e.target.value === addDays(r.date, 1) ? '' : e.target.value)}
                           style={{ width: 132, fontSize: 13, color: inAuto ? '#64748b' : '#c2410c' }} aria-label="入庫日期" disabled={!r.date} />
@@ -811,14 +879,65 @@ export default function SchedulePage() {
                         </span>
                       </td>
                       <td>
-                        {gcLink && <a href={gcLink} target="_blank" rel="noreferrer" title="加入 Google 日曆" style={{ fontSize: 14, textDecoration: 'none', opacity: 0.6 }}>📅</a>}
+                        {gcLink && <a href={gcLink} target="_blank" rel="noreferrer" title={also.length ? `加入 Google 日曆（含順便包 ${also.length} 項）` : '加入 Google 日曆'} style={{ fontSize: 14, textDecoration: 'none', opacity: 0.6 }}>📅</a>}
                       </td>
                     </tr>
+                    {showAlso && (
+                      <tr className="ps-also-row">
+                        <td></td>
+                        <td colSpan={6}>
+                          <div className="ps-also">
+                            <span className="ps-also-h">📦 順便包</span>
+                            {also.map(a => {
+                              const ox = a.orderId ? ordById[a.orderId] : null
+                              return (
+                                <span key={a.id} className="ps-also-chip">
+                                  {alsoTxt(a)}
+                                  {ox && !ox.row && !ox.packed && <em title="這筆客訂還沒扣庫存：到上面「客訂出貨」按「− 扣 N 包」">還沒扣庫存</em>}
+                                  <button onClick={() => setAlso(r.id, l => l.filter(y => y.id !== a.id))} title="拿掉" aria-label={`拿掉 ${alsoTxt(a)}`}>×</button>
+                                </span>
+                              )
+                            })}
+                            {alsoOpen !== r.id && <button className="ps-also-more" onClick={() => openAlso(r.id)}>＋ 再加</button>}
+                          </div>
+                          {alsoOpen === r.id && (
+                            <div className="ps-also-form">
+                              <select className="inp" value="" onChange={e => addAlsoOrder(r, e.target.value)} style={{ width: 210 }} aria-label="從客訂加入">
+                                <option value="">從客訂加入…（{ordOpts.length} 筆）</option>
+                                {ordOpts.map(x => {
+                                  const where = (alsoWhere[x.o.id] || []).filter(Boolean)
+                                  return (
+                                    <option key={x.o.id} value={String(x.o.id)}>
+                                      {`${mdOf(x.td)} 出貨 ${x.o.customer_name || x.o.customerName || ''} ${x.f || x.name} ${x.cv.bags}袋×${x.cv.g}g${where.length ? `（已排 ${where.map(mdOf).join('、')} 包）` : ''}`}
+                                    </option>
+                                  )
+                                })}
+                              </select>
+                              <span>或自己填</span>
+                              <input className="inp" list="ps-also-list" value={alsoDraft.item} onChange={e => setAlsoDraft(d => ({ ...d, item: e.target.value }))}
+                                onKeyDown={e => e.key === 'Enter' && addAlsoDraft(r)} placeholder="品項" style={{ width: 84 }} aria-label="順便包品項" />
+                              <input className="inp" inputMode="decimal" value={alsoDraft.qty} onChange={e => setAlsoDraft(d => ({ ...d, qty: cleanNum(e.target.value) }))}
+                                onKeyDown={e => e.key === 'Enter' && addAlsoDraft(r)} placeholder="數量" style={{ width: 62, textAlign: 'right' }} aria-label="順便包數量" />
+                              <select className="inp" value={alsoDraft.unit} onChange={e => setAlsoDraft(d => ({ ...d, unit: e.target.value }))} style={{ width: 54 }} aria-label="順便包單位">
+                                {ALSO_UNITS.map(u => <option key={u} value={u}>{u}</option>)}
+                              </select>
+                              <input className="inp" value={alsoDraft.note} onChange={e => setAlsoDraft(d => ({ ...d, note: e.target.value }))}
+                                onKeyDown={e => e.key === 'Enter' && addAlsoDraft(r)} placeholder="說明（客戶、規格）" style={{ width: 130 }} aria-label="順便包說明" />
+                              <button className="btn btn-dark btn-sm" onClick={() => addAlsoDraft(r)} style={{ fontSize: 12 }}>加入</button>
+                              <button className="btn btn-sm" onClick={() => setAlsoOpen(null)} style={{ fontSize: 12, background: '#f1f5f9', color: '#475569' }}>完成</button>
+                              <span style={{ width: '100%', color: '#a16207' }}>只記在排程和 Google 日曆上，不會扣庫存；客訂要扣庫存請用上面「客訂出貨」的「− 扣 N 包」。</span>
+                            </div>
+                          )}
+                        </td>
+                      </tr>
+                    )}
+                    </Fragment>
                   )
                 })}
               </tbody>
             </table>
           </div>
+          <datalist id="ps-also-list">{L.all.map(f => <option key={f} value={f} />)}</datalist>
           {undo && (
             <div className="ps-undo" role="status">
               已刪除「{undo.label}」，按 💾 存檔才會真的刪掉
