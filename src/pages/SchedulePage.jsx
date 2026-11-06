@@ -56,7 +56,24 @@ const uid = () => `r${Date.now().toString(36)}${(_uid++).toString(36)}`
 const withIds = rows => (rows || []).map(r => (r.id ? r : { ...r, id: uid() }))
 // 扣除列（−）：直接填包數，在「日期」當天從庫存扣掉（例如包客訂）
 const isOut = r => r.kind === 'out'
-const sortRows = rows => [...rows].sort((a, b) => (a.date || '9999').localeCompare(b.date || '9999') || (isOut(a) - isOut(b)))
+// 排程列的順序＝使用者排的順序（可以拖拉）；新列插在「最後一個日期 ≤ 它」的列後面，不動其他列
+const insertByDate = (rows, add) => {
+  const out = [...rows]
+  ;[].concat(add).forEach(n => {
+    const k = n.date || '9999'
+    let j = -1
+    out.forEach((r, idx) => { if ((r.date || '9999') <= k) j = idx })
+    out.splice(j + 1, 0, n)
+  })
+  return out
+}
+const byDate = rows => [...rows].sort((a, b) => (a.date || '9999').localeCompare(b.date || '9999')) // 穩定排序：同一天保留原本順序
+const GRIP = (
+  <svg width="8" height="14" viewBox="0 0 8 14" aria-hidden="true"><g fill="currentColor">
+    <circle cx="2" cy="2" r="1.3" /><circle cx="6" cy="2" r="1.3" /><circle cx="2" cy="7" r="1.3" />
+    <circle cx="6" cy="7" r="1.3" /><circle cx="2" cy="12" r="1.3" /><circle cx="6" cy="12" r="1.3" />
+  </g></svg>
+)
 const autoIn = r => r.inDate || r.date // 入庫日：沒填就是生產當天（當天下班前入庫完成）
 
 function makeDates(startIso, count) {
@@ -108,6 +125,8 @@ function diffSch(prev, cur) {
     if (!isOut(r)) alsoDiff(o, r)
   })
   prev.forEach(o => { if (!cm[o.id] && o.item) out.push(`刪除${kind(o)} ${d(o)}${withAlso(o)}`) })
+  // 拖拉調整順序（兩邊都有的列，前後順序不一樣）
+  if (prev.filter(r => cm[r.id]).map(r => r.id).join() !== cur.filter(r => pm[r.id]).map(r => r.id).join()) out.push('調整排程順序')
   return out
 }
 const diffPpb = (p, c) => Object.keys({ ...p, ...c }).filter(f => Number(p[f]) !== Number(c[f])).map(f => `${f} 每桶產量 ${p[f] ?? '—'} → ${c[f]} 包`)
@@ -354,7 +373,7 @@ export default function SchedulePage() {
     if (x.row) return
     const cust = x.o.customer_name || x.o.customerName || ''
     const r = { id: uid(), kind: 'out', date: x.td, item: x.f, qty: String(x.cv.packs), note: `${cust} ${x.cv.bags}袋×${x.cv.g}g`, orderId: x.o.id, barrels: 0 }
-    setSchData(rows => sortRows([...rows, r]))
+    setSchData(rows => insertByDate(rows, r))
     setFlash(r.id); setTimeout(() => setFlash(f => (f === r.id ? null : f)), 1800)
     showToast(`已加入扣除：${mdOf(r.date)} ${r.item || '（請選口味）'} −${fmtN(x.cv.packs)} 包（${x.cv.bags}袋×${x.cv.g}g），記得存檔`)
   }
@@ -399,7 +418,7 @@ export default function SchedulePage() {
       if (w === 0 || (w === 6 && !gen.sat) || have.has(iso)) continue
       add.push({ id: uid(), date: iso, item: '', barrels: 4, inDate: '' })
     }
-    setSchData(rows => sortRows([...rows, ...add]))
+    setSchData(rows => insertByDate(rows, add))
     showToast(add.length ? `已產生 ${add.length} 列，請選口味與桶數` : '這段日期都已經有排程了')
   }
   const blankCount = schData.filter(r => !r.item).length
@@ -422,6 +441,66 @@ export default function SchedulePage() {
     setSchData(d => { const n = [...d]; n.splice(Math.min(undo.index, n.length), 0, undo.row); return n })
     setUndo(null); clearTimeout(undoTimer.current)
   }
+  // ── 拖拉排序：電腦按住列的空白處（或左邊 ⠿）拖到想要的位置；手機、平板按住 ⠿ 拖 ──
+  const tblRef = useRef(null)
+  const dragRef = useRef(null)
+  const [drag, setDrag] = useState(null) // { id, to }：to＝要插在第幾列前面
+  const calcTo = y => {
+    const trs = [...(tblRef.current?.querySelectorAll('tbody tr[data-rid]') || [])]
+    const i = trs.findIndex(tr => { const b = tr.getBoundingClientRect(); return y < b.top + b.height / 2 })
+    return i < 0 ? trs.length : i
+  }
+  const startDrag = (e, r) => {
+    if (e.button !== 0 || dragRef.current) return
+    const onGrip = e.target.closest('.ps-grip')
+    if (!onGrip && (e.pointerType !== 'mouse' || e.target.closest('input, select, button, a, textarea, label'))) return
+    e.preventDefault()
+    const d = { id: r.id, y0: e.clientY, y: e.clientY, moved: false, to: null }
+    const retarget = () => { const to = calcTo(d.y); if (to !== d.to) { d.to = to; setDrag({ id: d.id, to }) } }
+    const move = ev => {
+      d.y = ev.clientY
+      if (!d.moved && Math.abs(d.y - d.y0) < 5) return
+      if (!d.moved) { d.moved = true; document.body.classList.add('ps-grabbing') }
+      retarget()
+    }
+    const tick = () => { // 拖到畫面上下邊緣時自動捲動
+      if (dragRef.current !== d) return
+      const edge = 70, h = window.innerHeight
+      const v = !d.moved ? 0 : d.y < edge ? -Math.ceil((edge - d.y) / 4) : d.y > h - edge ? Math.ceil((d.y - h + edge) / 4) : 0
+      if (v) { window.scrollBy(0, v); retarget() }
+      d.raf = requestAnimationFrame(tick)
+    }
+    const end = ev => {
+      window.removeEventListener('pointermove', move)
+      window.removeEventListener('pointerup', end)
+      window.removeEventListener('pointercancel', end)
+      cancelAnimationFrame(d.raf)
+      document.body.classList.remove('ps-grabbing')
+      dragRef.current = null
+      setDrag(null)
+      if (ev.type !== 'pointerup' || !d.moved || d.to == null) return
+      setSchData(rows => {
+        const from = rows.findIndex(x => x.id === d.id)
+        if (from < 0 || d.to === from || d.to === from + 1) return rows
+        const out = [...rows]
+        const [m] = out.splice(from, 1)
+        out.splice(d.to > from ? d.to - 1 : d.to, 0, m)
+        return out
+      })
+    }
+    d.end = end
+    dragRef.current = d
+    setDrag({ id: r.id, to: null })
+    window.addEventListener('pointermove', move)
+    window.addEventListener('pointerup', end)
+    window.addEventListener('pointercancel', end)
+    d.raf = requestAnimationFrame(tick)
+  }
+  useEffect(() => () => dragRef.current?.end({ type: 'unmount' }), [])
+  const unsorted = schData.some((r, i) => i > 0 && (schData[i - 1].date || '9999') > (r.date || '9999'))
+  const dragFrom = drag ? schData.findIndex(x => x.id === drag.id) : -1
+  const dropAt = drag && drag.to != null && drag.to !== dragFrom && drag.to !== dragFrom + 1 ? drag.to : null
+
   // 已經過去、不影響預估表的列：入庫日／扣除日在今天之前，也在預估表第一天（盤點日隔天）之前
   const firstIso = DATES[0]?.iso || today
   const cutIso = firstIso < today ? firstIso : today
@@ -443,7 +522,7 @@ export default function SchedulePage() {
   const dirty = loaded && (schChanges.length > 0 || ppbChanges.length > 0 || convChanges.length > 0)
   const save = async () => {
     if (!loaded) { alert(loadError ? '排程資料讀取失敗，無法存檔：' + loadError : '排程資料載入中，請稍候再存檔'); return }
-    const sorted = sortRows(schData)
+    const sorted = schData // 照畫面上的順序存（可以拖拉排序）
     const now = new Date().toISOString()
     setSaving(true)
     const { error } = await supabase.from('adv_schedule_config').upsert({
@@ -510,8 +589,8 @@ export default function SchedulePage() {
     const fmt = x => isoOf(x).replace(/-/g, '')
     const pk = (Number(ppb[r.item]) || 0) * (Number(r.barrels) || 0)
     const also = r.also || []
-    // 標題：生產排程:泡菜4桶；有順便包 → 生產排程:泡菜4桶(+包裝2項)
-    const title = `生產排程:${r.item}${r.barrels}桶${also.length ? `(+包裝${also.length}項)` : ''}`
+    // 標題：生產排程:泡菜4桶；有順便包 → 生產排程:泡菜4桶(有非常規包裝)
+    const title = `生產排程:${r.item}${r.barrels}桶${also.length ? '(有非常規包裝)' : ''}`
     const details = `品項：${r.item}\n桶數：${r.barrels}\n包數：${pk}包\n入庫日：${mdOf(autoIn(r))}`
       + (also.length ? `\n\n順便包：\n${also.map(a => `• ${alsoTxt(a)}`).join('\n')}` : '')
       + `\n\n詳情依「生產排程整合系統」為主：${window.location.origin}`
@@ -542,6 +621,14 @@ export default function SchedulePage() {
         .ps-tbl td { padding: 6px 6px !important; }
         .ps-out td { background: #fff5f5; }
         .ps-del { border: none; background: none; cursor: pointer; font-size: 15px; padding: 3px 5px; border-radius: 6px; opacity: .6; line-height: 1; }
+        .ps-grip { display: inline-flex; align-items: center; justify-content: center; width: 14px; height: 26px; vertical-align: middle; color: #94a3b8; cursor: grab; touch-action: none; border-radius: 4px; }
+        .ps-grip:hover { color: #334155; background: #f1f5f9; }
+        .ps-tbl tbody tr[data-rid] { cursor: grab; }
+        .ps-tbl tbody tr[data-rid] > td { user-select: none; -webkit-user-select: none; }
+        .ps-tbl .ps-dragging > td { opacity: .45; background: #eff6ff !important; }
+        .ps-tbl .ps-drop-before > td { box-shadow: inset 0 3px 0 #2563eb; }
+        .ps-tbl .ps-drop-after > td { box-shadow: inset 0 -3px 0 #2563eb; }
+        body.ps-grabbing, body.ps-grabbing * { cursor: grabbing !important; user-select: none !important; -webkit-user-select: none !important; }
         .ps-tbl tr:hover .ps-del { opacity: 1; }
         .ps-del:hover, .ps-del:focus-visible { opacity: 1; background: #fee2e2; }
         .ps-undo { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 8px; background: #1e293b; color: #fff; border-radius: 8px; padding: 7px 12px; font-size: 13px; }
@@ -788,9 +875,9 @@ export default function SchedulePage() {
           </div>
 
           <div style={{ overflowX: 'auto' }}>
-            <table className="tbl ps-tbl" style={{ fontSize: 14 }}>
+            <table ref={tblRef} className="tbl ps-tbl" style={{ fontSize: 14 }}>
               <thead><tr>
-                <th style={{ width: 30 }}></th>
+                <th style={{ width: 40 }}></th>
                 <th>日期</th>
                 <th>品項</th>
                 <th style={{ textAlign: 'center' }}>桶數</th>
@@ -802,7 +889,7 @@ export default function SchedulePage() {
                 {schData.length === 0 && (
                   <tr><td colSpan={7} style={{ textAlign: 'center', color: '#94a3b8', padding: 18 }}>還沒有排程。用上面的「批次產生」或下面的「＋ 新增生產」開始；要扣庫存（例如包客訂）按「− 新增扣除」。</td></tr>
                 )}
-                {schData.map(r => {
+                {schData.map((r, i) => {
                   const isSub = r.item && !L.main.includes(r.item)
                   const itemSelect = (
                     <select className="inp" value={r.item} onChange={e => updateSch(r.id, 'item', e.target.value)}
@@ -814,13 +901,18 @@ export default function SchedulePage() {
                   )
                   // 刪除按鈕放最前面，不用往右捲就看得到
                   const delCell = (
-                    <td style={{ textAlign: 'center', padding: '6px 2px' }}>
+                    <td style={{ padding: '6px 0 6px 2px', whiteSpace: 'nowrap' }}>
+                      <span className="ps-grip" title="按住拖拉，調整順序">{GRIP}</span>
                       <button className="ps-del" onClick={() => delRow(r)} title="刪除這列" aria-label={`刪除 ${rowLabel(r)}`}>🗑</button>
                     </td>
                   )
+                  // 拖拉中：被拖的列變淡；藍線標出要放的位置
+                  const dragCls = (dragFrom === i ? ' ps-dragging' : '') + (dropAt === i ? ' ps-drop-before' : '')
+                  const endCls = dropAt === schData.length && i === schData.length - 1 ? ' ps-drop-after' : ''
+                  const rowProps = { 'data-rid': r.id, onPointerDown: e => startDrag(e, r) }
                   // ── 扣除列（−）：直接填包數，日期當天從庫存扣掉 ──
                   if (isOut(r)) return (
-                    <tr key={r.id} className={`ps-out${r.item ? '' : ' ps-blank'}${flash === r.id ? ' ps-flash' : ''}`}>
+                    <tr key={r.id} {...rowProps} className={`ps-out${r.item ? '' : ' ps-blank'}${flash === r.id ? ' ps-flash' : ''}${dragCls}${endCls}`}>
                       {delCell}
                       <td style={{ whiteSpace: 'nowrap' }}>
                         <input type="date" className="inp" value={r.date || ''} onChange={e => updateSch(r.id, 'date', e.target.value)} style={{ width: 132, fontSize: 13 }} aria-label="扣除日期" />
@@ -850,7 +942,7 @@ export default function SchedulePage() {
                   const ordOpts = alsoOpen === r.id ? orderList.filter(x => !x.packed && !also.some(a => a.orderId === x.o.id)) : []
                   return (
                     <Fragment key={r.id}>
-                    <tr className={r.item ? '' : 'ps-blank'}>
+                    <tr {...rowProps} className={`${r.item ? '' : 'ps-blank'}${dragCls}${showAlso ? '' : endCls}`}>
                       {delCell}
                       <td style={{ whiteSpace: 'nowrap' }}>
                         <input type="date" className="inp" value={r.date || ''} onChange={e => updateSch(r.id, 'date', e.target.value)} style={{ width: 132, fontSize: 13 }} aria-label="生產日期" />
@@ -884,7 +976,7 @@ export default function SchedulePage() {
                       </td>
                     </tr>
                     {showAlso && (
-                      <tr className="ps-also-row">
+                      <tr className={`ps-also-row${dragFrom === i ? ' ps-dragging' : ''}${endCls}`}>
                         <td></td>
                         <td colSpan={6}>
                           <div className="ps-also">
@@ -953,6 +1045,10 @@ export default function SchedulePage() {
             {blankCount > 0 && (
               <button onClick={() => setSchData(d => d.filter(r => r.item))}
                 style={{ fontSize: 13, color: '#b45309', background: '#fffbeb', border: '1px solid #fde68a', borderRadius: 7, padding: '6px 12px', cursor: 'pointer' }}>清除未選口味的 {blankCount} 列</button>
+            )}
+            {unsorted && (
+              <button onClick={() => setSchData(byDate)} title="照日期重新排列（同一天的順序不變）"
+                style={{ fontSize: 13, color: '#1d4ed8', background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: 7, padding: '6px 12px', cursor: 'pointer' }}>↕ 依日期排列</button>
             )}
             {oldRows.length > 0 && (
               <button onClick={clearOld} title={`入庫日／扣除日在 ${mdOf(cutIso)} 之前，已經不影響預估表`}
