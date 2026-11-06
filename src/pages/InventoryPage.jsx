@@ -1,6 +1,7 @@
-import { useState, useEffect, useMemo } from 'react'
+import { useState, useEffect, useMemo, Fragment } from 'react'
 import { loadPage, loadLogs, savePage, SaveBar, AdjustLog, LoadError, Toast } from '../lib/pageSave'
-import { flavorLists, DEFAULT_MAX_CAP, toIso, todayIso, wdOf } from '../lib/flavors'
+import { DEFAULT_MAX_CAP, toIso, todayIso, wdOf } from '../lib/flavors'
+import { flavorGroups } from './SalesPage' // 品項與分類跟著銷售計畫
 
 // 預設值（銷售計畫／本頁有存檔就以存檔為準）
 const DAILY    = {黃金:83,泡菜:38,咖哩:11,素花:60,新鮮:41,剝皮:53,酸白:28,原味:44,綠蔬:25,紅燒:4,藥膳:1,香羹:6,珍菇:2,猴菇:1,油飯:3}
@@ -47,7 +48,8 @@ const stOf = (v, mn, mx) => v <= 0 ? 'out' : (mn > 0 && v < mn) ? 'low' : (mx > 
 export default function InventoryPage() {
   // 品項主檔與每日預估、最低庫存：跟銷售計畫連動（同 Excel），銷售計畫沒存檔才用預設值
   const [salesRows, setSalesRows] = useState(null)
-  const L = useMemo(() => flavorLists(salesRows), [salesRows])
+  const [salesCats, setSalesCats] = useState(null) // 銷售計畫的分類（其他品項、代工品、自訂）
+  const L = useMemo(() => flavorGroups(salesRows, salesCats), [salesRows, salesCats])
   const daily = useMemo(() => salesRows ? Object.fromEntries(salesRows.map(r => [r.f, Number(r.d) || 0])) : DAILY, [salesRows])
   const minOf = useMemo(() => salesRows ? Object.fromEntries(salesRows.map(r => [r.f, Number(r.m) || 0])) : INIT_MN, [salesRows])
   const sumD = L.main.reduce((s, f) => s + (daily[f] || 0), 0)
@@ -61,7 +63,7 @@ export default function InventoryPage() {
   const [refill, setRefill] = useState({})
 
   // 存檔相關
-  const [saved, setSaved] = useState(() => normInv({ date: todayIso(), inv: INIT_CUR, mxSub: INIT_MX_SUB }, flavorLists(null)))
+  const [saved, setSaved] = useState(() => normInv({ date: todayIso(), inv: INIT_CUR, mxSub: INIT_MX_SUB }, flavorGroups(null)))
   const [lastSaved, setLastSaved] = useState(null)
   const [logs, setLogs] = useState([])
   const [loaded, setLoaded] = useState(false)
@@ -74,8 +76,8 @@ export default function InventoryPage() {
     (async () => {
       const s = await loadPage('sales')
       const rows = s.data?.data?.saleData || null
-      if (rows) setSalesRows(rows)
-      const Lx = flavorLists(rows)
+      if (rows) { setSalesRows(rows); setSalesCats(s.data.data.cats || null) }
+      const Lx = flavorGroups(rows, s.data?.data?.cats)
       const { data, error } = await loadPage('inventory')
       if (error) { setLoadError(error.message); return }
       if (data?.data) {
@@ -236,7 +238,7 @@ export default function InventoryPage() {
             </tr></thead>
             <tbody>
               {InvRows({ flavors: L.main, title: '主產品（水餃・餡餅・湯包）' })}
-              {InvRows({ flavors: L.sub, title: '其他品項' })}
+              {L.groups.map(g => <Fragment key={g.name}>{InvRows({ flavors: g.items, title: g.name })}</Fragment>)}
             </tbody>
           </table>
         </div>
@@ -263,7 +265,7 @@ export default function InventoryPage() {
           庫存上限 = 最高庫容量 × 銷售比 × （1 + 上限增益%）<br/>
           銷售比、每日預估、最低庫存{salesRows ? '依「銷售計畫」自動帶入' : '目前用預設值（銷售計畫存檔後會自動改用銷售計畫的數字）'}<br/>
           主產品的庫存上限也可以直接手動輸入；清空（或按「恢復自動」）就回到公式自動計算<br/>
-          其他品項沒有銷售比，庫存上限請直接手動輸入
+          主產品以外的分類（其他品項、代工品…）沒有銷售比，庫存上限請直接手動輸入
         </div>
         <div style={{overflowX:'auto'}}>
           <table className="tbl">
@@ -276,7 +278,7 @@ export default function InventoryPage() {
             </tr></thead>
             <tbody>
               {UpperRows({ flavors: L.main, title: '主產品（水餃・餡餅・湯包）' })}
-              {UpperRows({ flavors: L.sub, title: '其他品項' })}
+              {L.groups.map(g => <Fragment key={g.name}>{UpperRows({ flavors: g.items, title: g.name })}</Fragment>)}
             </tbody>
           </table>
         </div>

@@ -1,7 +1,8 @@
 import { useState, useMemo, useEffect, useRef, Fragment } from 'react'
 import { supabase } from '../lib/supabase'
 import { fmtDT, loadPage, loadLogs, savePageData, addLog, AdjustLog } from '../lib/pageSave'
-import { flavorLists, DEFAULT_PPB, DEFAULT_MAX_CAP, isoOf, parseIso, addDays, wdOf, mdOf, todayIso, toIso, WD } from '../lib/flavors'
+import { DEFAULT_PPB, DEFAULT_MAX_CAP, isoOf, parseIso, addDays, wdOf, mdOf, todayIso, toIso, WD } from '../lib/flavors'
+import { flavorGroups } from './SalesPage' // 品項與分類跟著銷售計畫
 import { orderAnomalies, shipDateOf } from './OrdersPage'
 
 // ③ 生產排程（生產排程科）＝ Excel「3.生產排程表」＋「庫存量預估表」
@@ -237,7 +238,7 @@ export default function SchedulePage() {
   }, [])
 
   // ── 連動：品項主檔／每日預估／最低庫存＝銷售計畫；起始庫存／上限／盤點日＝庫存狀況 ──
-  const L = useMemo(() => flavorLists(linked.sales?.saleData), [linked])
+  const L = useMemo(() => flavorGroups(linked.sales?.saleData, linked.sales?.cats), [linked])
   const maxCap = Number(linked.inventory?.maxCap) || DEFAULT_MAX_CAP
   const eff = useMemo(() => {
     const s = linked.sales, inv = linked.inventory
@@ -896,7 +897,7 @@ export default function SchedulePage() {
                       style={{ width: 92, fontSize: 13, borderColor: r.item ? undefined : '#f59e0b', background: isSub ? '#f5f3ff' : undefined }} aria-label="品項">
                       <option value="">選擇口味</option>
                       <optgroup label="主產品">{L.main.map(f => <option key={f} value={f}>{f}</option>)}</optgroup>
-                      <optgroup label="其他品項">{L.sub.map(f => <option key={f} value={f}>{f}</option>)}</optgroup>
+                      {L.groups.map(g => <optgroup key={g.name} label={g.name}>{g.items.map(f => <option key={f} value={f}>{f}</option>)}</optgroup>)}
                     </select>
                   )
                   // 刪除按鈕放最前面，不用往右捲就看得到
