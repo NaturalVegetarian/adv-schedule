@@ -57,7 +57,7 @@ const withIds = rows => (rows || []).map(r => (r.id ? r : { ...r, id: uid() }))
 // 扣除列（−）：直接填包數，在「日期」當天從庫存扣掉（例如包客訂）
 const isOut = r => r.kind === 'out'
 const sortRows = rows => [...rows].sort((a, b) => (a.date || '9999').localeCompare(b.date || '9999') || (isOut(a) - isOut(b)))
-const autoIn = r => r.inDate || addDays(r.date, 1) // 入庫日：沒填就是生產日隔天（同 Excel）
+const autoIn = r => r.inDate || r.date // 入庫日：沒填就是生產當天（當天下班前入庫完成）
 
 function makeDates(startIso, count) {
   const B0 = parseIso(startIso) || new Date()
@@ -188,11 +188,11 @@ export default function SchedulePage() {
       const { data, error } = await supabase.from('adv_schedule_config').select('*').eq('id', 'default').maybeSingle()
       if (error) { setLoadError(error.message); return }
       if (data) {
-        // 舊資料的入庫日如果剛好是生產日隔天，就視為「自動」
+        // 入庫日跟生產日同一天＝「自動」（當天入庫）
         const rows = withIds(data.sch_data).map(r => {
           if (isOut(r)) return { ...r, date: toIso(r.date) }
           const date = toIso(r.date), inDate = toIso(r.inDate)
-          return { ...r, date, inDate: inDate && inDate !== addDays(date, 1) ? inDate : '' }
+          return { ...r, date, inDate: inDate && inDate !== date ? inDate : '' }
         })
         setSchData(rows); setSavedSch(rows)
         if (data.rules) setRules(data.rules)
@@ -510,10 +510,11 @@ export default function SchedulePage() {
     const fmt = x => isoOf(x).replace(/-/g, '')
     const pk = (Number(ppb[r.item]) || 0) * (Number(r.barrels) || 0)
     const also = r.also || []
-    const short = also.slice(0, 3).map(alsoShort).join('、') + (also.length > 3 ? ` 等 ${also.length} 項` : '')
-    const title = `生產排程：${r.item} ${r.barrels}桶（入庫 ${mdOf(autoIn(r))}）${also.length ? `｜順便包：${short}` : ''}`
+    // 標題：生產排程:泡菜4桶；有順便包 → 生產排程:泡菜4桶(+包裝2項)
+    const title = `生產排程:${r.item}${r.barrels}桶${also.length ? `(+包裝${also.length}項)` : ''}`
     const details = `品項：${r.item}\n桶數：${r.barrels}\n包數：${pk}包\n入庫日：${mdOf(autoIn(r))}`
       + (also.length ? `\n\n順便包：\n${also.map(a => `• ${alsoTxt(a)}`).join('\n')}` : '')
+      + `\n\n詳情依「生產排程整合系統」為主：${window.location.origin}`
     return `https://calendar.google.com/calendar/r/eventedit?text=${encodeURIComponent(title)}&dates=${fmt(s)}/${fmt(e)}&details=${encodeURIComponent(details)}`
   }
 
@@ -872,10 +873,10 @@ export default function SchedulePage() {
                         )}
                       </td>
                       <td style={{ whiteSpace: 'nowrap' }}>
-                        <input type="date" className="inp" value={r.date ? autoIn(r) : ''} onChange={e => updateSch(r.id, 'inDate', e.target.value === addDays(r.date, 1) ? '' : e.target.value)}
+                        <input type="date" className="inp" value={r.date ? autoIn(r) : ''} onChange={e => updateSch(r.id, 'inDate', e.target.value === r.date ? '' : e.target.value)}
                           style={{ width: 132, fontSize: 13, color: inAuto ? '#64748b' : '#c2410c' }} aria-label="入庫日期" disabled={!r.date} />
                         <span style={{ fontSize: 11, marginLeft: 4, color: inAuto ? '#94a3b8' : '#c2410c' }}>
-                          {inAuto ? '隔天' : <button onClick={() => updateSch(r.id, 'inDate', '')} style={{ border: 'none', background: 'none', color: '#2563eb', cursor: 'pointer', fontSize: 11, padding: 0 }}>改回隔天</button>}
+                          {inAuto ? '當天' : <button onClick={() => updateSch(r.id, 'inDate', '')} style={{ border: 'none', background: 'none', color: '#2563eb', cursor: 'pointer', fontSize: 11, padding: 0 }}>改回當天</button>}
                         </span>
                       </td>
                       <td>
