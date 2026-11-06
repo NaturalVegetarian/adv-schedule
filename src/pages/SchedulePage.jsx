@@ -316,10 +316,13 @@ export default function SchedulePage() {
       .map(({ o, td }) => {
         const name = o.item_name || o.itemName || ''
         const f = L.all.find(x => name.includes(x)) || ''
-        return { o, td, name, f, cv: convOf(o, f), warn: soonIds.has(o.id), row: used[o.id] || null }
+        // packed：已到「確認出貨」關卡＝包裝科已完成備貨，貨已經包好，不用再預扣庫存
+        return { o, td, name, f, cv: convOf(o, f), warn: soonIds.has(o.id), row: used[o.id] || null, packed: o.status === 'prepared' }
       })
   }, [orders, anomaly, schData, today, L, convOf])
-  const ordPending = orderList.filter(x => !x.row).length
+  const ordPending = orderList.filter(x => !x.row && !x.packed).length
+  const ordPacked = orderList.filter(x => x.packed).length
+  const removeRow = id => { setSchData(d => d.filter(r => r.id !== id)); showToast('已刪除這列扣除，記得存檔') }
   const todayShip = orders.filter(o => toIso(o.target_date || o.targetDate) === today)
 
   // 客訂 → 加一列扣除（日期＝出貨日、包數＝換算後的包數，都可以再改）
@@ -474,6 +477,9 @@ export default function SchedulePage() {
         .ps-ord-row .q2 { font-size: 13px; font-weight: 800; color: #1e293b; }
         .ps-ord-row .s { font-size: 11px; color: #64748b; background: #f1f5f9; border-radius: 10px; padding: 1px 4px; text-align: center; white-space: nowrap; }
         .ps-ord-row.warn .d, .ps-ord-row.warn .c { color: #be123c; font-weight: 800; }
+        .ps-ord-row.packed { background: #f8fafc; }
+        .ps-ord-row.packed .d, .ps-ord-row.packed .c, .ps-ord-row.packed .f, .ps-ord-row.packed .q2 { color: #94a3b8; }
+        .ps-ord-packed { justify-self: end; font-size: 12px; font-weight: 700; color: #64748b; background: #f1f5f9; border-radius: 7px; padding: 4px 8px; white-space: nowrap; }
         .ps-ord-btn { justify-self: end; font-size: 13px; font-weight: 800; color: #fff; background: #dc2626; border: none; border-radius: 7px; padding: 4px 9px; cursor: pointer; font-family: inherit; white-space: nowrap; }
         .ps-ord-done { justify-self: end; font-size: 12px; color: #047857; font-weight: 700; white-space: nowrap; display: flex; flex-direction: column; align-items: flex-end; gap: 2px; }
         .ps-ord-done.off { color: #b45309; }
@@ -487,7 +493,7 @@ export default function SchedulePage() {
           .ps-ord-row { grid-template-columns: minmax(0, 1fr) 40px 112px; grid-template-areas: "d f q" "c c a"; row-gap: 2px; }
           .ps-ord-row .d { grid-area: d; } .ps-ord-row .f { grid-area: f; } .ps-ord-row .q { grid-area: q; }
           .ps-ord-row .c { grid-area: c; } .ps-ord-row .s { display: none; }
-          .ps-ord-row .ps-ord-btn, .ps-ord-row .ps-ord-done { grid-area: a; }
+          .ps-ord-row .ps-ord-btn, .ps-ord-row .ps-ord-done, .ps-ord-row .ps-ord-packed { grid-area: a; }
           .ps-conv-row select { width: 86px !important; }
           .ps-conv-row input { width: 56px !important; }
         }
@@ -575,7 +581,7 @@ export default function SchedulePage() {
             <button className="ps-ord-h" onClick={() => setShowOrd(v => !v)} aria-expanded={showOrd}>
               <strong>📦 客訂出貨</strong>
               <span style={{ fontSize: 13 }}>
-                {orderList.length === 0 ? '目前沒有待出貨的客訂' : `${orderList.length} 筆${ordPending > 0 ? `，${ordPending} 筆還沒扣庫存` : '，都已扣庫存'}`}
+                {orderList.length === 0 ? '目前沒有待出貨的客訂' : `${orderList.length} 筆${ordPending > 0 ? `，${ordPending} 筆還沒扣庫存` : '，沒有要扣的'}${ordPacked ? `（${ordPacked} 筆已包裝，不用扣）` : ''}`}
               </span>
               <span style={{ marginLeft: 'auto', fontSize: 12 }}>{showOrd ? '收合 ▲' : '展開 ▼'}</span>
             </button>
@@ -587,7 +593,7 @@ export default function SchedulePage() {
                     const done = x.row ? Number(x.row.qty) || 0 : 0
                     const off = x.row && Math.abs(done - x.cv.packs) > 0.005 // 已扣的包數跟換算不同
                     return (
-                      <div key={x.o.id} className={`ps-ord-row${x.warn ? ' warn' : ''}`} title={x.warn ? '快到出貨日，還沒完成備貨' : `${cust}｜${x.name}`}>
+                      <div key={x.o.id} className={`ps-ord-row${x.warn ? ' warn' : ''}${x.packed ? ' packed' : ''}`} title={x.warn ? '快到出貨日，還沒完成備貨' : x.packed ? '包裝科已完成備貨，貨已經包好，不用扣庫存' : `${cust}｜${x.name}`}>
                         <span className="d">{mdOf(x.td)}（{wdOf(x.td).slice(1)}）</span>
                         <span className="c">{x.warn ? '⚠ ' : ''}{cust}</span>
                         <span className="f">{x.f || '—'}</span>
@@ -596,7 +602,16 @@ export default function SchedulePage() {
                           <span className="q2">＝ {fmtN(x.cv.packs)} 包</span>
                         </span>
                         <span className="s">{ORDER_STAGE[x.o.status] || ''}</span>
-                        {x.row
+                        {x.packed && !x.row
+                          ? <span className="ps-ord-packed">📦 已包裝，不用扣</span>
+                          : x.packed
+                          ? ( // 先扣過、後來才包裝好：提醒可以刪掉這列扣除
+                            <span className="ps-ord-done off">
+                              ✓ 已扣 −{fmtN(done)} 包
+                              <button className="ps-ord-fix" onClick={() => removeRow(x.row.id)}>已包裝，刪除這列扣除</button>
+                            </span>
+                          )
+                          : x.row
                           ? (
                             <span className={`ps-ord-done${off ? ' off' : ''}`}>
                               ✓ 已扣 −{fmtN(done)} 包{x.row.date !== x.td ? `（${mdOf(x.row.date)}）` : ''}
@@ -614,7 +629,7 @@ export default function SchedulePage() {
                 </div>
                 <div className="ps-ord-tip">
                   按「− 扣 N 包」會在下面排程表加一列扣除（日期＝出貨日、包數＝袋數換算成庫存包數，都可以再改），存檔後預估表當天就會扣掉。
-                  已過出貨日、未填出貨日的客訂請到「客訂管理 → 異常狀態」處理。
+                  已到「確認出貨」關卡的客訂（包裝科已完成備貨）貨已經包好，不用再扣。已過出貨日、未填出貨日的客訂請到「客訂管理 → 異常狀態」處理。
                 </div>
               </>
             )}
