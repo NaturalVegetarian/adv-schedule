@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect } from 'react'
+import { useState, useMemo, useEffect, useRef } from 'react'
 import { supabase } from '../lib/supabase'
 import { fmtDT, loadPage, loadLogs, savePageData, addLog, AdjustLog } from '../lib/pageSave'
 import { flavorLists, DEFAULT_PPB, DEFAULT_MAX_CAP, isoOf, parseIso, addDays, wdOf, mdOf, todayIso, toIso, WD } from '../lib/flavors'
@@ -146,6 +146,9 @@ export default function SchedulePage() {
   const [linked, setLinked] = useState({ sales: null, inventory: null })
   const [showOrd, setShowOrd] = useState(true) // 客訂出貨清單展開／收合
   const [flash, setFlash] = useState(null) // 剛加入的扣除列，閃一下
+  const [undo, setUndo] = useState(null) // 剛刪掉的列（可以復原）
+  const undoTimer = useRef(null)
+  useEffect(() => () => clearTimeout(undoTimer.current), [])
   const [conv, setConv] = useState(() => withRuleIds(DEFAULT_CONV)) // 客訂換算規則
   const [savedConv, setSavedConv] = useState(() => withRuleIds(DEFAULT_CONV))
   const [showConv, setShowConv] = useState(false)
@@ -358,6 +361,36 @@ export default function SchedulePage() {
     showToast(add.length ? `已產生 ${add.length} 列，請選口味與桶數` : '這段日期都已經有排程了')
   }
   const blankCount = schData.filter(r => !r.item).length
+
+  // 刪除一列（按 💾 存檔才會真的刪掉；10 秒內可以復原）
+  const rowLabel = r => {
+    const d = r.date ? `${mdOf(r.date)}（${wdOf(r.date).slice(1)}）` : '未定日期'
+    if (!r.item) return `${d} 空白列`
+    return isOut(r) ? `${d} ${r.item} 扣除 −${fmtN(r.qty)} 包` : `${d} ${r.item} ${r.barrels} 桶`
+  }
+  const delRow = r => {
+    const index = schData.findIndex(x => x.id === r.id)
+    setSchData(d => d.filter(x => x.id !== r.id))
+    setUndo({ row: r, index, label: rowLabel(r) })
+    clearTimeout(undoTimer.current)
+    undoTimer.current = setTimeout(() => setUndo(null), 10000)
+  }
+  const undoDel = () => {
+    if (!undo) return
+    setSchData(d => { const n = [...d]; n.splice(Math.min(undo.index, n.length), 0, undo.row); return n })
+    setUndo(null); clearTimeout(undoTimer.current)
+  }
+  // 已經過去、不影響預估表的列：入庫日／扣除日在今天之前，也在預估表第一天（盤點日隔天）之前
+  const firstIso = DATES[0]?.iso || today
+  const cutIso = firstIso < today ? firstIso : today
+  const oldRows = schData.filter(r => r.date && (isOut(r) ? r.date : autoIn(r)) < cutIso)
+  const clearOld = () => {
+    if (!confirm(`確定刪除 ${oldRows.length} 列已經過去的排程？\n入庫日／扣除日在 ${mdOf(cutIso)} 之前，已經不影響預估表。\n（按 💾 存檔才會真的刪掉）`)) return
+    const ids = new Set(oldRows.map(r => r.id))
+    setSchData(d => d.filter(r => !ids.has(r.id)))
+    setUndo(null)
+    showToast(`已清除 ${ids.size} 列，記得存檔`)
+  }
   const tot = schData.reduce((s, r) => s + (r.item && !isOut(r) ? (Number(ppb[r.item]) || 0) * (Number(r.barrels) || 0) : 0), 0)
   const outTot = schData.reduce((s, r) => s + (r.item && isOut(r) ? Number(r.qty) || 0 : 0), 0)
 
@@ -388,6 +421,7 @@ export default function SchedulePage() {
     setSaving(false)
     const cleanConv = withRuleIds(normConv(conv)) // 存檔後拿掉沒填完整的換算列
     setSchData(sorted); setSavedSch(sorted); setSavedPpb(ppb); setConv(cleanConv); setSavedConv(cleanConv); setLastSaved(now)
+    setUndo(null); clearTimeout(undoTimer.current) // 存檔後就不能復原了
     if (ch.length) setLogs(l => [{ id: 'new-' + now, created_at: now, changes: ch }, ...l].slice(0, 50))
     showToast('排程已儲存 ✅')
   }
@@ -460,6 +494,11 @@ export default function SchedulePage() {
         .ps-gen { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 10px; padding: 8px 10px; margin-bottom: 10px; font-size: 13px; color: #475569; }
         .ps-tbl td { padding: 6px 6px !important; }
         .ps-out td { background: #fff5f5; }
+        .ps-del { border: none; background: none; cursor: pointer; font-size: 15px; padding: 3px 5px; border-radius: 6px; opacity: .6; line-height: 1; }
+        .ps-tbl tr:hover .ps-del { opacity: 1; }
+        .ps-del:hover, .ps-del:focus-visible { opacity: 1; background: #fee2e2; }
+        .ps-undo { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 8px; background: #1e293b; color: #fff; border-radius: 8px; padding: 7px 12px; font-size: 13px; }
+        .ps-undo button { background: #fff; color: #1e293b; border: none; border-radius: 6px; padding: 3px 12px; font-weight: 800; cursor: pointer; font-family: inherit; }
         .ps-blank td { background: #fffbeb; }
         .ps-outchip { display: inline-block; font-size: 12px; font-weight: 800; color: #b91c1c; background: #fee2e2; border: 1px solid #fecaca; border-radius: 6px; padding: 1px 8px; white-space: nowrap; }
         .ps-flash td { animation: psflash 1.8s ease-out; }
@@ -692,13 +731,13 @@ export default function SchedulePage() {
           <div style={{ overflowX: 'auto' }}>
             <table className="tbl ps-tbl" style={{ fontSize: 14 }}>
               <thead><tr>
+                <th style={{ width: 30 }}></th>
                 <th>日期</th>
                 <th>品項</th>
                 <th style={{ textAlign: 'center' }}>桶數</th>
                 <th style={{ textAlign: 'right' }}>包數</th>
                 <th>入庫日期／說明</th>
                 <th style={{ width: 28 }}></th>
-                <th style={{ width: 24 }}></th>
               </tr></thead>
               <tbody>
                 {schData.length === 0 && (
@@ -714,15 +753,18 @@ export default function SchedulePage() {
                       <optgroup label="其他品項">{L.sub.map(f => <option key={f} value={f}>{f}</option>)}</optgroup>
                     </select>
                   )
-                  const delBtn = (
-                    <button onClick={() => setSchData(d => d.filter(x => x.id !== r.id))} title="刪除這列"
-                      style={{ color: '#94a3b8', background: 'none', border: 'none', cursor: 'pointer', fontSize: 15, padding: '0 2px' }}>×</button>
+                  // 刪除按鈕放最前面，不用往右捲就看得到
+                  const delCell = (
+                    <td style={{ textAlign: 'center', padding: '6px 2px' }}>
+                      <button className="ps-del" onClick={() => delRow(r)} title="刪除這列" aria-label={`刪除 ${rowLabel(r)}`}>🗑</button>
+                    </td>
                   )
                   // ── 扣除列（−）：直接填包數，日期當天從庫存扣掉 ──
                   if (isOut(r)) return (
                     <tr key={r.id} className={`ps-out${r.item ? '' : ' ps-blank'}${flash === r.id ? ' ps-flash' : ''}`}>
+                      {delCell}
                       <td style={{ whiteSpace: 'nowrap' }}>
-                        <input type="date" className="inp" value={r.date || ''} onChange={e => updateSch(r.id, 'date', e.target.value)} style={{ width: 140, fontSize: 13 }} aria-label="扣除日期" />
+                        <input type="date" className="inp" value={r.date || ''} onChange={e => updateSch(r.id, 'date', e.target.value)} style={{ width: 132, fontSize: 13 }} aria-label="扣除日期" />
                         <span style={{ fontSize: 12, color: '#94a3b8', marginLeft: 4 }}>{wdOf(r.date)}</span>
                       </td>
                       <td>{itemSelect}</td>
@@ -735,10 +777,9 @@ export default function SchedulePage() {
                       </td>
                       <td>
                         <input className="inp" value={r.note || ''} onChange={e => updateSch(r.id, 'note', e.target.value)} placeholder="客戶／原因（例：包客訂）"
-                          style={{ width: 170, fontSize: 13 }} aria-label="扣除說明" />
+                          style={{ width: 150, fontSize: 13 }} aria-label="扣除說明" />
                       </td>
                       <td>{r.orderId && <span title="由客訂出貨帶入" style={{ fontSize: 13, opacity: 0.6 }}>🔗</span>}</td>
-                      <td>{delBtn}</td>
                     </tr>
                   )
                   const pk = r.item ? (Number(ppb[r.item]) || 0) * (Number(r.barrels) || 0) : 0
@@ -746,8 +787,9 @@ export default function SchedulePage() {
                   const inAuto = !r.inDate
                   return (
                     <tr key={r.id} className={r.item ? '' : 'ps-blank'}>
+                      {delCell}
                       <td style={{ whiteSpace: 'nowrap' }}>
-                        <input type="date" className="inp" value={r.date || ''} onChange={e => updateSch(r.id, 'date', e.target.value)} style={{ width: 140, fontSize: 13 }} aria-label="生產日期" />
+                        <input type="date" className="inp" value={r.date || ''} onChange={e => updateSch(r.id, 'date', e.target.value)} style={{ width: 132, fontSize: 13 }} aria-label="生產日期" />
                         <span style={{ fontSize: 12, color: r.date && [0, 6].includes(parseIso(r.date)?.getDay()) ? '#c2410c' : '#94a3b8', marginLeft: 4 }}>{wdOf(r.date)}</span>
                       </td>
                       <td>{itemSelect}</td>
@@ -763,7 +805,7 @@ export default function SchedulePage() {
                       <td style={{ textAlign: 'right', fontWeight: 700 }}>{pk > 0 ? pk.toLocaleString() : '—'}</td>
                       <td style={{ whiteSpace: 'nowrap' }}>
                         <input type="date" className="inp" value={r.date ? autoIn(r) : ''} onChange={e => updateSch(r.id, 'inDate', e.target.value === addDays(r.date, 1) ? '' : e.target.value)}
-                          style={{ width: 140, fontSize: 13, color: inAuto ? '#64748b' : '#c2410c' }} aria-label="入庫日期" disabled={!r.date} />
+                          style={{ width: 132, fontSize: 13, color: inAuto ? '#64748b' : '#c2410c' }} aria-label="入庫日期" disabled={!r.date} />
                         <span style={{ fontSize: 11, marginLeft: 4, color: inAuto ? '#94a3b8' : '#c2410c' }}>
                           {inAuto ? '隔天' : <button onClick={() => updateSch(r.id, 'inDate', '')} style={{ border: 'none', background: 'none', color: '#2563eb', cursor: 'pointer', fontSize: 11, padding: 0 }}>改回隔天</button>}
                         </span>
@@ -771,13 +813,18 @@ export default function SchedulePage() {
                       <td>
                         {gcLink && <a href={gcLink} target="_blank" rel="noreferrer" title="加入 Google 日曆" style={{ fontSize: 14, textDecoration: 'none', opacity: 0.6 }}>📅</a>}
                       </td>
-                      <td>{delBtn}</td>
                     </tr>
                   )
                 })}
               </tbody>
             </table>
           </div>
+          {undo && (
+            <div className="ps-undo" role="status">
+              已刪除「{undo.label}」，按 💾 存檔才會真的刪掉
+              <button onClick={undoDel}>復原</button>
+            </div>
+          )}
           <div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap', alignItems: 'center' }}>
             <button className="ps-addbtn" onClick={() => setSchData(d => [...d, { id: uid(), date: '', item: '', barrels: 4, inDate: '' }])}
               style={{ color: '#047857', background: 'none', border: '1px dashed #6ee7b7' }}>＋ 新增生產</button>
@@ -786,6 +833,10 @@ export default function SchedulePage() {
             {blankCount > 0 && (
               <button onClick={() => setSchData(d => d.filter(r => r.item))}
                 style={{ fontSize: 13, color: '#b45309', background: '#fffbeb', border: '1px solid #fde68a', borderRadius: 7, padding: '6px 12px', cursor: 'pointer' }}>清除未選口味的 {blankCount} 列</button>
+            )}
+            {oldRows.length > 0 && (
+              <button onClick={clearOld} title={`入庫日／扣除日在 ${mdOf(cutIso)} 之前，已經不影響預估表`}
+                style={{ fontSize: 13, color: '#475569', background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 7, padding: '6px 12px', cursor: 'pointer' }}>清除已過去的 {oldRows.length} 列</button>
             )}
             <span style={{ fontSize: 13, color: '#64748b' }}>
               合計 生產 <strong style={{ color: '#047857' }}>{tot > 0 ? `+${tot.toLocaleString()} 包` : '—'}</strong>
