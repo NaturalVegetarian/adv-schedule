@@ -225,7 +225,8 @@ export default function OrdersPage({ user }) {
   const [placeOpen, setPlaceOpen] = useState(false) // 地點清單管理展開
   const [placeDraft, setPlaceDraft] = useState({ name: '', detail: '' })
   const [statusMerge, setStatusMerge] = useState(EMPTY_MERGE) // 確認訂單視窗裡的併櫃資訊
-  const [calFor, setCalFor] = useState(null) // Google 日曆提醒：{ key 哪一批, confirmed 剛確認訂單 }
+  const [calFor, setCalFor] = useState(null) // 出貨的 Google 日曆（預排客訂確認訂單後）：{ key 哪一批, confirmed }
+  const [prodCalFor, setProdCalFor] = useState(null) // 生產排程的 Google 日曆（等待排程）：{ id 訂單, confirmed 剛排入行程 }
   const [filterFlavor, setFilterFlavor] = useState('')
   const [shipMonth, setShipMonth] = useState('') // 完成出貨（歷史）目前選的月份 'YYYY-MM'
   const [toast, setToast] = useState(null)
@@ -704,7 +705,8 @@ export default function OrdersPage({ user }) {
       if (!m.on) { const sib = orders.find(x => x.id !== o.id && x.status !== LOST && batchKey(x) === batchKey(o) && x.cs?.merge?.on); if (sib) m = mergeOf(sib) }
       setStatusMerge(m)
       setStatusDate(shipDateOf(o) || mergeShipDate(m))
-    } else setStatusDate(formatDate(new Date()))
+    } else if (o.status === 'pending') setStatusDate(toIso(o.scheduled_date || o.scheduledDate) || formatDate(new Date())) // 排入行程：已經填過排程生產日就帶入
+    else setStatusDate(formatDate(new Date()))
     setStatusModal({ order: o, nextStatus: STATES[idx + 1], label: NEXT_ACTION[o.status] })
   }
   const setStatusMergeP = patch => {
@@ -739,6 +741,37 @@ export default function OrdersPage({ user }) {
     const cal = list.map(o => o.cs || {}).find(c => c.calAt && c.calDate === td) || null
     return { list, pre, td, title, details, url: td ? gcalUrl(title, td, details) : '', cal, m }
   }
+  // ── 生產排程的 Google 日曆（等待排程）：格式跟生產排程頁一樣（標題 品項*數量；內容 品項、數量、日期、詳情）──
+  const prodCalInfo = o => {
+    const date = toIso(o.scheduled_date || o.scheduledDate)
+    const item = o.item_name || o.itemName || ''
+    const bags = Number(o.quantity) || 0
+    const boxes = getBoxCount(o)
+    const ipb = Number(o.box_qty_each || o.items_per_box || o.itemsPerBox) || 0
+    const td = shipDateOf(o)
+    const title = `${item}*${boxes ? `${boxes}箱` : `${bags}袋`}`
+    const lines = [
+      `品項：${item}`,
+      `客戶：${o.customer_name || o.customerName || ''}`,
+      `數量：${bags}袋${boxes ? `（${boxes}箱${ipb ? ` × ${ipb}袋` : ''}）` : ''}`,
+      `每袋重量：${o.weight_per_bag || 5250}g`,
+      date && `生產日：${mdw(date)}`,
+      td && `出貨日：${mdw(td)}`,
+      o.notes && `備註：${o.notes}`,
+    ].filter(Boolean)
+    const details = [...lines, '', `詳情依「生產排程整合系統」為主：${window.location.origin}`].join('\n')
+    const cs = o.cs || {}
+    return { date, title, details, url: date ? gcalUrl(title, date, details) : '', added: cs.prodCalAt && cs.prodCalDate === date ? cs : null }
+  }
+  const markProdCal = async (o, info) => {
+    const now = new Date().toISOString()
+    const cs = { ...(o.cs || {}), prodCalAt: now, prodCalBy: me, prodCalDate: info.date }
+    setOrders(l => l.map(x => (x.id === o.id ? { ...x, cs } : x)))
+    setProdCalFor(null)
+    showToast('已開 Google 日曆，在那邊按「儲存」✅')
+    await updateOrder(o.id, { cs, updated_at: now }, '日曆紀錄沒存到：')
+  }
+
   // 按下「加入 Google 日曆」：整批記下已加（之後再按會提醒已經加過）
   const markCal = async info => {
     const now = new Date().toISOString()
@@ -1151,8 +1184,6 @@ export default function OrdersPage({ user }) {
               const bPkg = batch.reduce((s, o) => s + getPkgCount(o), 0)
               const bBox = batch.reduce((s, o) => s + getBoxCount(o), 0)
               const bm = batch.map(mergeOf).find(x => x.on && x.date)
-              const bcal = batch.map(o => o.cs || {}).find(c => c.calAt && c.calDate === group.td)
-              const canCal = ACTIVE.includes(activeTab) && !!group.td
               return (
               <div key={gKey} style={{ background: '#fff', borderRadius: 24, border: `1px solid ${th.border}`, overflow: 'hidden', marginBottom: 16, breakInside: 'avoid' }}>
                 {/* 母客戶＋出貨日標題列：筆數、包數、箱數算整批 */}
@@ -1163,10 +1194,6 @@ export default function OrdersPage({ user }) {
                   </div>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                     <span className="op-batch-total" style={{ fontSize: 13, color: 'rgba(255,255,255,.92)', fontWeight: 700 }}>共{batch.length}筆・{bPkg}包{bBox > 0 ? `・${bBox}箱` : ''}</span>
-                    {canCal && (
-                      <button onClick={() => setCalFor({ key: gKey, confirmed: false })} title={bcal ? '已加過 Google 日曆（可以再加）' : '加入 Google 日曆'} aria-label="這批出貨加入 Google 日曆"
-                        style={{ background: 'rgba(255,255,255,.22)', border: 'none', borderRadius: 8, color: '#fff', fontSize: 13, fontWeight: 800, padding: '3px 8px', cursor: 'pointer', fontFamily: 'inherit', whiteSpace: 'nowrap' }}>📅{bcal ? ' 已加' : ''}</button>
-                    )}
                   </div>
                 </div>
                 {(others.length > 0 || bm) && (
@@ -1265,6 +1292,13 @@ export default function OrdersPage({ user }) {
                           <div style={{ fontWeight: 700, color: th.accent }}>{o.status === 'preorder' ? '預計出貨' : '出貨'}：{o.target_date||o.targetDate || '未定'}</div>
                         </div>
                         <div style={{ display: 'flex', gap: 4 }}>
+                          {o.status === 'pending' && (() => { // 等待排程：生產排程加入 Google 日曆
+                            const added = prodCalInfo(o).added
+                            return (
+                              <button onClick={() => setProdCalFor({ id: o.id, confirmed: false })} aria-label="生產排程加入 Google 日曆" title={added ? '已加過生產排程的日曆（可以再加）' : '生產排程加入 Google 日曆'}
+                                style={{ background: added ? '#eff6ff' : 'none', border: 'none', borderRadius: 8, cursor: 'pointer', fontSize: added ? 13 : 16, fontWeight: 800, color: '#2563eb', padding: '4px 6px', whiteSpace: 'nowrap', fontFamily: 'inherit' }}>📅{added ? ' 已加' : ''}</button>
+                            )
+                          })()}
                           <button onClick={() => openEditForm(o)} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 16, color: '#94a3b8', padding: '4px 6px' }}>✏️</button>
                           <button onClick={() => deleteOrder(o.id)} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 16, color: '#94a3b8', padding: '4px 6px' }}>🗑️</button>
                           {o.status === 'preorder'
@@ -1409,10 +1443,14 @@ export default function OrdersPage({ user }) {
                 }
                 const { error } = await updateOrder(o.id, updateData, '狀態已更新，但')
                 if (error) { alert('狀態更新失敗：' + error.message); return }
-                if (o.status === 'preorder') { // 轉到等待排程後，問要不要加 Google 日曆
+                if (o.status === 'preorder') { // 轉到等待排程後，問要不要加出貨的 Google 日曆
                   const up = { ...o, ...updateData }
                   setOrders(l => l.map(x => (x.id === o.id ? up : x)))
                   setCalFor({ key: batchKey(up), confirmed: true })
+                }
+                if (o.status === 'pending' && statusDate) { // 排入行程後，問要不要加生產排程的 Google 日曆
+                  setOrders(l => l.map(x => (x.id === o.id ? { ...o, ...updateData } : x)))
+                  setProdCalFor({ id: o.id, confirmed: true })
                 }
                 fetchOrders()
                 showToast(`${statusModal.label} ✅`)
@@ -1423,7 +1461,46 @@ export default function OrdersPage({ user }) {
         </div>
       )}
 
-      {/* Google 日曆提醒：確認訂單後（或卡片上的 📅） */}
+      {/* 生產排程的 Google 日曆：排入行程後、或等待排程卡片上的 📅 */}
+      {prodCalFor && (() => {
+        const o = orders.find(x => x.id === prodCalFor.id)
+        if (!o) return null
+        const info = prodCalInfo(o)
+        return (
+          <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,.7)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 125, padding: 16 }}>
+            <div role="dialog" aria-label="生產排程加入 Google 日曆" style={{ background: '#fff', width: '100%', maxWidth: 400, borderRadius: 24, padding: 22, maxHeight: '92vh', overflowY: 'auto' }}>
+              {prodCalFor.confirmed && <div style={{ fontSize: 14, fontWeight: 800, color: '#047857', marginBottom: 6 }}>✅ 已排入行程，轉到「包材準備」</div>}
+              <h2 style={{ fontSize: 16, fontWeight: 900, marginBottom: 4 }}>📅 要把生產排程加到 Google 日曆嗎？</h2>
+              <div style={{ fontSize: 13, color: '#64748b', marginBottom: 12 }}>格式跟「生產排程」頁的日曆一樣，放在生產日。</div>
+              {!info.date ? (
+                <div style={{ fontSize: 14, color: '#b45309', background: '#fffbeb', borderRadius: 12, padding: 12 }}>還沒有排程生產日：按 ✏️ 填「排程生產日」，或按「排入行程」選日期。</div>
+              ) : (
+                <>
+                  <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 12, padding: '10px 12px', marginBottom: 10 }}>
+                    <div style={{ fontSize: 12, color: '#64748b' }}>{mdw(info.date)}　整天</div>
+                    <div className="op-cal-title" style={{ fontSize: 17, fontWeight: 900, color: '#1e293b', margin: '2px 0 6px' }}>{info.title}</div>
+                    <div className="op-cal-details" style={{ fontSize: 12.5, color: '#334155', whiteSpace: 'pre-wrap', lineHeight: 1.6 }}>{info.details}</div>
+                  </div>
+                  {info.added && (
+                    <div style={{ fontSize: 13, fontWeight: 700, color: '#0369a1', background: '#f0f9ff', borderRadius: 10, padding: '8px 10px', marginBottom: 8 }}>
+                      ℹ {mdOf(info.date)} 的生產排程已經加過日曆（{fmtMDHM(info.added.prodCalAt)} {info.added.prodCalBy}），再加會多一個活動。
+                    </div>
+                  )}
+                </>
+              )}
+              <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+                <button onClick={() => setProdCalFor(null)} style={{ flex: 1, padding: '11px', background: '#f1f5f9', border: 'none', borderRadius: 12, fontWeight: 700, color: '#64748b', cursor: 'pointer', fontFamily: 'inherit' }}>{info.url ? '先不要' : '關閉'}</button>
+                {info.url && (
+                  <a href={info.url} target="_blank" rel="noreferrer" onClick={() => markProdCal(o, info)}
+                    style={{ flex: 2, padding: '11px', background: '#2563eb', color: '#fff', borderRadius: 12, fontWeight: 900, textAlign: 'center', textDecoration: 'none' }}>📅 {info.added ? '再加一次' : '加入 Google 日曆'}</a>
+                )}
+              </div>
+            </div>
+          </div>
+        )
+      })()}
+
+      {/* 出貨的 Google 日曆：預排客訂按「確認訂單」後 */}
       {calFor && (() => {
         const info = batchCal(calFor.key)
         const preNames = uniq(info.pre.map(o => o.item_name || o.itemName)).join('、')
