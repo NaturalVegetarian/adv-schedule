@@ -3,7 +3,7 @@ import { supabase } from '../lib/supabase'
 import { fmtDT, loadPage, loadLogs, savePageData, addLog, AdjustLog } from '../lib/pageSave'
 import { DEFAULT_PPB, DEFAULT_MAX_CAP, isoOf, parseIso, addDays, wdOf, mdOf, todayIso, toIso, WD } from '../lib/flavors'
 import { flavorGroups } from './SalesPage' // 品項與分類跟著銷售計畫
-import { orderAnomalies, shipDateOf } from './OrdersPage'
+import { orderAnomalies, shipDateOf, isOemOrder } from './OrdersPage'
 
 // ③ 生產排程（生產排程科）＝ Excel「3.生產排程表」＋「庫存量預估表」
 // 每日庫存 ＝ 前一天庫存 − 每日預估銷售量（含節日加乘）− 當天已確定銷售量 ＋ 當天入庫量
@@ -226,7 +226,9 @@ export default function SchedulePage() {
     })()
   }, [])
 
-  // 客訂（列在生產排程表上方；按「− 扣庫存」才會扣）
+  // 客訂（列在生產排程表上方；按「− 扣庫存」才會扣）。代工品（客訂管理 ⚙️ 品項清單勾的）不列、不扣庫存
+  const [itemSpecs, setItemSpecs] = useState({})
+  useEffect(() => { loadPage('orders').then(({ data }) => setItemSpecs(data?.data?.itemSpecs || {})) }, [])
   useEffect(() => {
     const fetchOrders = async () => {
       const { data } = await supabase.from('adv_orders').select('*').in('status', ['pending','packaging','scheduled','prepared'])
@@ -354,6 +356,7 @@ export default function SchedulePage() {
     const used = {} // 已經扣過庫存的客訂 → 對應的扣除列
     schData.forEach(r => { if (isOut(r) && r.orderId) used[r.orderId] = r })
     return orders
+      .filter(o => !isOemOrder(o, itemSpecs))
       .map(o => ({ o, td: shipDateOf(o) }))
       .filter(x => x.td && x.td >= today)
       .sort((a, b) => a.td.localeCompare(b.td))
@@ -363,7 +366,7 @@ export default function SchedulePage() {
         // packed：已到「確認出貨」關卡＝包裝科已完成備貨，貨已經包好，不用再預扣庫存
         return { o, td, name, f, cv: convOf(o, f), warn: soonIds.has(o.id), row: used[o.id] || null, packed: o.status === 'prepared' }
       })
-  }, [orders, anomaly, schData, today, L, convOf])
+  }, [orders, anomaly, schData, today, L, convOf, itemSpecs])
   const ordPending = orderList.filter(x => !x.row && !x.packed).length
   const ordPacked = orderList.filter(x => x.packed).length
   const removeRow = id => { setSchData(d => d.filter(r => r.id !== id)); showToast('已刪除這列扣除，記得存檔') }
@@ -590,8 +593,8 @@ export default function SchedulePage() {
     const fmt = x => isoOf(x).replace(/-/g, '')
     const pk = (Number(ppb[r.item]) || 0) * (Number(r.barrels) || 0)
     const also = r.also || []
-    // 標題：生產排程:泡菜4桶；有順便包 → 生產排程:泡菜4桶(有非常規包裝)
-    const title = `生產排程:${r.item}${r.barrels}桶${also.length ? '(有非常規包裝)' : ''}`
+    // 標題：泡菜*4；有順便包 → 泡菜*4(有非常規包裝)
+    const title = `${r.item}*${r.barrels}${also.length ? '(有非常規包裝)' : ''}`
     const details = `品項：${r.item}\n桶數：${r.barrels}\n包數：${pk}包\n入庫日：${mdOf(autoIn(r))}`
       + (also.length ? `\n\n順便包：\n${also.map(a => `• ${alsoTxt(a)}`).join('\n')}` : '')
       + `\n\n詳情依「生產排程整合系統」為主：${window.location.origin}`

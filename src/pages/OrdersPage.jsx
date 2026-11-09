@@ -24,7 +24,8 @@ const NEXT_ACTION = Object.fromEntries(STATES.filter(s => STAGE[s].action).map(s
 
 // ── 包材：內包裝（彩袋／空白真空袋＋尺寸）＋貼紙（尺寸、送印／自印、內容）＋倉管勾選 ──
 // 存在 adv_orders.pack（jsonb），第一次使用要先在 Supabase SQL Editor 執行 PACK_SQL
-const EMPTY_PACK = { inner: '', bagSize: '', sticker: false, stickerSize: '', stickerPrint: '', stickerNote: '', checks: {} }
+// carton／cartonNote：外箱貼（跟麥頭分開）；oem：代工品（不進生產排程、不扣庫存）
+const EMPTY_PACK = { inner: '', bagSize: '', sticker: false, stickerSize: '', stickerPrint: '', stickerNote: '', carton: false, cartonNote: '', oem: false, checks: {} }
 // 尺寸單位：真空袋 cm、貼紙 mm（100×150mm＝10×15 公分）
 const DEFAULT_SIZES = { bag: [], sticker: ['100×150'] }
 // 內包裝：資料庫存的值不變（原包裝／真空袋），畫面顯示的名稱
@@ -60,6 +61,7 @@ function packItems(o, boxes) {
   if (bt) list.push({ key: 'box', name: '外箱', spec: `${bt}${boxes ? ` × ${boxes} 箱` : ''}`, v: `box|${bt}|${boxes}` })
   if (o.shipping_mark || o.shippingMark) list.push({ key: 'mark', name: '一般麥頭', spec: boxes ? `${boxes} 箱用` : '', v: `mark|${boxes}` })
   if (o.color_mark) list.push({ key: 'color', name: '彩色麥頭', spec: [o.color_mark_note, boxes ? `${boxes} 箱用` : ''].filter(Boolean).join(' · '), v: `color|${o.color_mark_note || ''}|${boxes}` })
+  if (pk.carton) list.push({ key: 'carton', name: '外箱貼', spec: [pk.cartonNote, boxes ? `${boxes} 箱用` : ''].filter(Boolean).join(' · '), v: `carton|${pk.cartonNote || ''}|${boxes}` })
   if (pk.inner === '真空袋') list.push({ key: 'inner', name: INNER_LABEL.真空袋, spec: `${bagSizeTxt(pk.bagSize) || '尺寸未填'} × ${bags} 個`, v: `inner|真空袋|${pk.bagSize}|${bags}` })
   if (pk.inner === '原包裝') list.push({ key: 'inner', name: INNER_LABEL.原包裝, spec: `× ${bags} 個`, v: `inner|原包裝|${bags}` })
   if (pk.sticker) list.push({
@@ -72,6 +74,41 @@ function packItems(o, boxes) {
 
 // 出貨日統一成 YYYY-MM-DD（舊資料可能是 2026/11/4 或 11/4）
 export const shipDateOf = o => toIso(o.target_date || o.targetDate)
+
+// 同一個客戶（"-" 前面的母客戶）同一天出貨＝同一批；不管單子走到哪一關都一起算
+const parentOf = o => { const n = o.customer_name || o.customerName || '未知客戶'; return n.includes('-') ? n.split('-')[0] : n }
+const batchKey = o => `${parentOf(o)}|${shipDateOf(o)}`
+
+// ── 併櫃：出貨日＝併櫃日前 2 個工作天（避開週末、國定假日）。例：11/10（二）併櫃 → 11/6（五）出貨 ──
+// 國定假日＝政府行政機關辦公日曆表上，週一～週五放假的日子（每年要補下一年）
+const TW_HOLIDAYS = new Set([
+  '2026-01-01', '2026-02-16', '2026-02-17', '2026-02-18', '2026-02-19', '2026-02-20', '2026-02-27', '2026-04-03', '2026-04-06',
+  '2026-05-01', '2026-06-19', '2026-09-25', '2026-09-28', '2026-10-09', '2026-10-26', '2026-12-25',
+  '2027-01-01', '2027-02-04', '2027-02-05', '2027-02-08', '2027-02-09', '2027-02-10', '2027-03-01', '2027-04-05', '2027-04-06',
+  '2027-04-30', '2027-06-09', '2027-09-15', '2027-09-28', '2027-10-11', '2027-10-25', '2027-12-24', '2027-12-31',
+])
+const MERGE_LEAD = 2 // 併櫃日前幾個工作天出貨
+const MERGE_TIMES = ['早上10點', '下午']
+// 存在 adv_orders.cs.merge：{ on 要併櫃, date 併櫃日, time 時間, place 地點 }
+const EMPTY_MERGE = { on: false, date: '', time: '', place: '' }
+const isWorkday = iso => { const d = parseIso(iso); return !!d && d.getDay() !== 0 && d.getDay() !== 6 && !TW_HOLIDAYS.has(iso) }
+export const workdaysBefore = (iso, n) => {
+  let d = iso, k = 0
+  while (d && k < n) { d = addDays(d, -1); if (isWorkday(d)) k++ }
+  return d || ''
+}
+const mergeShipDate = m => (m?.on && m.date ? workdaysBefore(m.date, MERGE_LEAD) : '')
+const mergeOf = o => ({ ...EMPTY_MERGE, ...(o?.cs?.merge || {}) })
+const mdw = iso => (iso ? `${mdOf(iso)}（${wdOf(iso).slice(1)}）` : '')
+const mergeTxt = m => (m?.on && m.date ? `${mdw(m.date)}${m.time ? ` ${m.time}` : ''}併櫃${m.place ? ` · ${m.place}` : ''}` : '')
+
+// ── 品項清單：adv_page_config 'orders' → { itemSpecs: { 品名: { g 每袋重量, perBox 每箱袋數, oem 代工品 } }, places: [{ name, detail }] } ──
+// 代工品（例：里仁剝皮辣椒）只在客訂管理跑流程，不進生產排程的客訂出貨、不扣庫存
+export const isOemOrder = (o, specs) => !!(o?.pack?.oem || specs?.[o?.item_name || o?.itemName]?.oem)
+
+// Google 日曆（整天的活動，按下去會開 Google 日曆的新增活動頁，可以選要放哪一個日曆）
+const gcalUrl = (title, date, details) =>
+  `https://calendar.google.com/calendar/r/eventedit?text=${encodeURIComponent(title)}&dates=${date.replace(/-/g, '')}/${addDays(date, 1).replace(/-/g, '')}&details=${encodeURIComponent(details)}`
 
 // ── 預排客訂：客服追蹤（存在 adv_orders.cs，jsonb）──
 // cs = { receivedAt 接單時間, owner 負責人, next 下次追蹤日, logs: [{ at, by, note, next, kind }],
@@ -182,7 +219,13 @@ export default function OrdersPage({ user }) {
   const [isConfirmOpen, setIsConfirmOpen] = useState(false)
   const [editingOrderId, setEditingOrderId] = useState(null)
   const [isAddingNewItem, setIsAddingNewItem] = useState(false)
-  const [newItemName, setNewItemName] = useState('')
+  const [newItem, setNewItem] = useState({ name: '', g: '', perBox: '', oem: false }) // 表單裡直接新增品項
+  const [itemSpecs, setItemSpecs] = useState({}) // 品名 → { g 每袋重量, perBox 每箱袋數, oem 代工品 }
+  const [places, setPlaces] = useState([]) // 併櫃／送貨地點 [{ name, detail }]
+  const [placeOpen, setPlaceOpen] = useState(false) // 地點清單管理展開
+  const [placeDraft, setPlaceDraft] = useState({ name: '', detail: '' })
+  const [statusMerge, setStatusMerge] = useState(EMPTY_MERGE) // 確認訂單視窗裡的併櫃資訊
+  const [calFor, setCalFor] = useState(null) // Google 日曆提醒：{ key 哪一批, confirmed 剛確認訂單 }
   const [filterFlavor, setFilterFlavor] = useState('')
   const [shipMonth, setShipMonth] = useState('') // 完成出貨（歷史）目前選的月份 'YYYY-MM'
   const [toast, setToast] = useState(null)
@@ -210,6 +253,7 @@ export default function OrdersPage({ user }) {
     color_mark: false, color_mark_note: '',
     box_count: 0, box_qty_each: 0,
     pack: EMPTY_PACK,
+    merge: EMPTY_MERGE, // 存檔時放進 cs.merge（資料庫沒有 merge 欄位）
   }
   const [formData, setFormData] = useState(emptyForm)
 
@@ -237,6 +281,21 @@ export default function OrdersPage({ user }) {
     fetchConfig()
   }, [])
 
+  // 品項清單（規格、代工品）與併櫃地點
+  useEffect(() => {
+    loadPage('orders').then(({ data }) => {
+      if (data?.data) { setItemSpecs(data.data.itemSpecs || {}); setPlaces(data.data.places || []) }
+    })
+  }, [])
+  const saveOrderConfig = async patch => {
+    const next = { itemSpecs, places, ...patch }
+    if (patch.itemSpecs) setItemSpecs(patch.itemSpecs)
+    if (patch.places) setPlaces(patch.places)
+    const { error } = await savePageData('orders', next)
+    if (error) showToast('⚠ 沒存到：' + error.message)
+    return !error
+  }
+
   // 尺寸選單：還沒存過清單時＝預設＋訂單用過的尺寸；存過之後就照清單（刪掉的不會再跑回來）
   const allSizes = useMemo(() => (packSizes.src === 'default'
     ? { bag: uniq([...packSizes.bag, ...orders.map(o => o.pack?.bagSize)]), sticker: uniq([...packSizes.sticker, ...orders.map(o => o.pack?.stickerSize)]) }
@@ -256,6 +315,46 @@ export default function OrdersPage({ user }) {
       return n
     })
     if (formError) setFormError('')
+  }
+
+  // 選品項（打字或從清單選）：清單有設定的話帶入每袋重量、每箱袋數
+  const pickItem = (value, spec) => {
+    const sp = spec || itemSpecs[value]
+    setFormData(p => {
+      const n = { ...p, item_name: value }
+      // 營業用：預設 空白真空袋＋貼紙（100×150mm）（還沒選過內包裝才帶入，可再改）
+      if (String(value).includes('營業用') && !p.pack?.inner) {
+        n.pack = { ...EMPTY_PACK, ...(p.pack || {}), inner: '真空袋', sticker: true, stickerSize: p.pack?.stickerSize || defSticker() }
+      }
+      if (sp && Number(sp.g) > 0) n.weight_per_bag = Number(sp.g)
+      if (sp && Number(sp.perBox) > 0) n.items_per_box = String(sp.perBox)
+      return n
+    })
+    if (sp && Number(sp.perBox) > 0) { setUseBoxCalc(true); setBoxQtyInput(String(sp.perBox)) }
+    if (formError) setFormError('')
+  }
+  // 併櫃：改併櫃日（或打開併櫃）就自動算出貨日（還是可以再改）
+  const setMerge = patch => {
+    setFormData(p => {
+      const m = { ...EMPTY_MERGE, ...(p.merge || {}), ...patch }
+      const n = { ...p, merge: m }
+      if ('date' in patch || 'on' in patch) { const sd = mergeShipDate(m); if (sd) n.target_date = sd }
+      return n
+    })
+    if (formError) setFormError('')
+  }
+  // 地點清單：同名就更新
+  const savePlace = async () => {
+    const name = placeDraft.name.trim(), detail = placeDraft.detail.trim()
+    if (!name) { showToast('請填地點名稱'); return }
+    const exists = places.some(x => x.name === name)
+    const ok = await saveOrderConfig({ places: exists ? places.map(x => (x.name === name ? { name, detail } : x)) : [...places, { name, detail }] })
+    if (ok) { setMerge({ place: name }); setPlaceDraft({ name: '', detail: '' }); showToast(exists ? `已更新地點「${name}」✅` : `已新增地點「${name}」✅`) }
+  }
+  const deletePlace = async name => {
+    if (!confirm(`確定從清單刪除地點「${name}」？\n（已經下的訂單不受影響）`)) return
+    await saveOrderConfig({ places: places.filter(x => x.name !== name) })
+    if (formData.merge?.place === name) setMerge({ place: '' })
   }
 
   // 包材欄位
@@ -365,13 +464,15 @@ export default function OrdersPage({ user }) {
     e.preventDefault()
     setFormError('')
     if (!formData.customer_name.trim()) { setFormError('請填寫客戶名稱'); return }
-    if (!formData.item_name) { setFormError('請選擇口味品項'); return }
+    if (!formData.item_name.trim()) { setFormError('請選擇或輸入品項'); return }
     const isPre = formIsPre // 預排的出貨日可以先空著
     if (!isPre && !formData.target_date) { setFormError('請選擇指定出貨日'); return }
     const pk = { ...EMPTY_PACK, ...(formData.pack || {}) }
     if (pk.inner === '真空袋' && !pk.bagSize) { setFormError('請選空白真空袋尺寸（沒有的話按「＋ 新增／刪除尺寸」）'); return }
     if (pk.sticker && !pk.stickerSize) { setFormError('請選貼紙尺寸'); return }
     if (pk.sticker && !pk.stickerPrint) { setFormError('請選貼紙是「送印」還是「自印」'); return }
+    const m = { ...EMPTY_MERGE, ...(formData.merge || {}) }
+    if (m.on && !m.date) { setFormError('請填併櫃日期（不併櫃的話把「這批要併櫃」取消）'); return }
 
     let finalQty = 0
     if (useBoxCalc) {
@@ -395,7 +496,11 @@ export default function OrdersPage({ user }) {
         ...pk, stickerNote: (pk.stickerNote || '').trim(),
         bagSize: pk.inner === '真空袋' ? pk.bagSize : '',
         ...(pk.sticker ? {} : { stickerSize: '', stickerPrint: '', stickerNote: '' }),
+        carton: !!pk.carton, cartonNote: pk.carton ? (pk.cartonNote || '').trim() : '',
+        oem: !!itemSpecs[formData.item_name.trim()]?.oem,
       },
+      item_name: formData.item_name.trim(),
+      merge: m.on ? { on: true, date: m.date, time: (m.time || '').trim(), place: m.place || '' } : EMPTY_MERGE,
     })
     setIsConfirmOpen(true)
   }
@@ -406,8 +511,9 @@ export default function OrdersPage({ user }) {
     const existingOrder = orders.find(o => o.id === editingOrderId)
     try {
       const now = new Date().toISOString()
+      const { merge, ...data } = pendingOrderData // merge 不是資料庫欄位，放進 cs.merge
       const row = {
-        id, ...pendingOrderData,
+        id, ...data,
         status: existingOrder?.status || 'preorder', // 新接的單先放「預排客訂」，客服確認後才到等待排程
         created_at: existingOrder?.created_at || now,
         created_by: user?.session?.user?.id,
@@ -416,7 +522,9 @@ export default function OrdersPage({ user }) {
       if (!existingOrder) {
         const note = csDraft.note.trim()
         row.cs = { receivedAt: now, owner: me, next: csDraft.next || '', logs: [{ at: now, by: me, note: `接單${note ? `：${note}` : ''}`, next: csDraft.next || '', kind: 'new' }] }
-      }
+      } else row.cs = { ...(existingOrder.cs || {}) }
+      if (merge?.on) row.cs.merge = merge
+      else delete row.cs.merge
       let { error } = await supabase.from('adv_orders').upsert(row)
       const missing = []
       while (error && COL_SQL[missingCol(error)] && !missing.includes(missingCol(error))) { // 資料庫還沒有 pack／cs 欄位
@@ -455,11 +563,12 @@ export default function OrdersPage({ user }) {
     setIsFormOpen(false); setEditingOrderId(null); setIsAddingNewItem(false)
     setFormError(''); setUseBoxCalc(false); setBoxCountInput(''); setBoxQtyInput('')
     setAddingSize(null); setNewSize('')
+    setPlaceOpen(false); setPlaceDraft({ name: '', detail: '' })
     setFormData(emptyForm)
   }
 
   const openEditForm = order => {
-    setFormData({ ...emptyForm, ...order, pack: { ...EMPTY_PACK, ...(order.pack || {}) } })
+    setFormData({ ...emptyForm, ...order, pack: { ...EMPTY_PACK, ...(order.pack || {}) }, merge: mergeOf(order) })
     if ((order.box_count||0) > 0) { setUseBoxCalc(true); setBoxCountInput(String(order.box_count)); setBoxQtyInput(String(order.box_qty_each)) }
     setEditingOrderId(order.id); setIsFormOpen(true)
   }
@@ -470,19 +579,41 @@ export default function OrdersPage({ user }) {
     fetchOrders()
   }
 
+  // 規格只存有填的欄位
+  const specOf = c => {
+    const g = Number(c.g) || 0, perBox = Number(c.perBox) || 0
+    return g || perBox || c.oem ? { ...(g ? { g } : {}), ...(perBox ? { perBox } : {}), ...(c.oem ? { oem: true } : {}) } : null
+  }
   const saveNewFlavor = async () => {
-    if (!newItemName.trim()) return
-    const items = [...savedItems, newItemName.trim()]
+    const name = newItem.name.trim()
+    if (!name) return
+    const items = savedItems.includes(name) ? savedItems : [...savedItems, name]
     await supabase.from('adv_flavor_config').upsert({ id: 'default', items, updated_at: new Date().toISOString() })
     setSavedItems(items)
-    setFormData(p => ({ ...p, item_name: newItemName.trim() }))
-    setNewItemName(''); setIsAddingNewItem(false); showToast('規格新增成功 ✅')
+    const sp = specOf(newItem)
+    const specs = { ...itemSpecs }
+    if (sp) specs[name] = sp; else delete specs[name]
+    await saveOrderConfig({ itemSpecs: specs })
+    pickItem(name, sp || {})
+    setNewItem({ name: '', g: '', perBox: '', oem: false }); setIsAddingNewItem(false); showToast('品項新增成功 ✅')
   }
 
+  // ⚙️ 品項管理：品名＋每袋重量、每箱袋數、代工品
+  const openSettings = () => {
+    setEditingConfigs(savedItems.map(name => ({ name, g: itemSpecs[name]?.g || '', perBox: itemSpecs[name]?.perBox || '', oem: !!itemSpecs[name]?.oem })))
+    setIsSettingsOpen(true)
+  }
   const syncSettings = async () => {
-    const newItems = editingConfigs.map(c => c.trim()).filter(Boolean)
-    await supabase.from('adv_flavor_config').upsert({ id: 'default', items: newItems, updated_at: new Date().toISOString() })
-    setSavedItems(newItems); setIsSettingsOpen(false); showToast('品名已同步 ✅')
+    const rows = editingConfigs.map(c => ({ ...c, name: String(c.name || '').trim() })).filter(c => c.name)
+    const names = uniq(rows.map(c => c.name))
+    // 只動視窗裡列出來的品項；不在清單上的規格（例：別人剛加的）保留
+    const shown = new Set(savedItems)
+    const specs = Object.fromEntries(Object.entries(itemSpecs).filter(([k]) => !shown.has(k)))
+    rows.forEach(c => { const sp = specOf(c); if (sp) specs[c.name] = sp; else delete specs[c.name] })
+    await supabase.from('adv_flavor_config').upsert({ id: 'default', items: names, updated_at: new Date().toISOString() })
+    setSavedItems(names)
+    const ok = await saveOrderConfig({ itemSpecs: specs })
+    setIsSettingsOpen(false); if (ok) showToast('品項已同步 ✅')
   }
 
 
@@ -535,15 +666,26 @@ export default function OrdersPage({ user }) {
     })
   const cst = useMemo(() => csStats(orders, todayStr), [orders, todayStr])
   const lostOrders = useMemo(() => orders.filter(o => o.status === LOST).sort((a, b) => String(b.cs?.lostAt || '').localeCompare(String(a.cs?.lostAt || ''))), [orders])
-  const groupedByCustomer = filteredOrders.reduce((acc, o) => {
+  // 整批：同客戶同出貨日的所有單（不分關卡；未成交不算）
+  const batches = useMemo(() => {
+    const m = {}
+    orders.forEach(o => { if (o.status === LOST) return; const k = batchKey(o); (m[k] = m[k] || []).push(o) })
+    return m
+  }, [orders])
+  // 卡片依「客戶（母客戶）＋出貨日」分組；同一張卡裡再依完整客戶名分子客戶
+  const groupedByBatch = filteredOrders.reduce((acc, o) => {
     const fullName = o.customer_name || o.customerName || '未知客戶'
-    const parentKey = fullName.includes('-') ? fullName.split('-')[0] : fullName
-    if (!acc[parentKey]) acc[parentKey] = { subGroups: {}, all: [] }
-    if (!acc[parentKey].subGroups[fullName]) acc[parentKey].subGroups[fullName] = []
-    acc[parentKey].subGroups[fullName].push(o)
-    acc[parentKey].all.push(o)
+    const key = batchKey(o)
+    if (!acc[key]) acc[key] = { parent: parentOf(o), td: shipDateOf(o), subGroups: {}, all: [], first: Object.keys(acc).length }
+    if (!acc[key].subGroups[fullName]) acc[key].subGroups[fullName] = []
+    acc[key].subGroups[fullName].push(o)
+    acc[key].all.push(o)
     return acc
   }, {})
+  // 生產部的關卡：出貨日近的在前（沒填出貨日的放最後）；預排、完成出貨照原本的順序
+  const groupList = Object.entries(groupedByBatch).sort(([, a], [, b]) => (ACTIVE.includes(activeTab)
+    ? (a.td || '9999').localeCompare(b.td || '9999') || a.first - b.first
+    : a.first - b.first))
 
   const formatDate = d => d ? `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}` : ''
   const tdOf = shipDateOf
@@ -557,8 +699,55 @@ export default function OrdersPage({ user }) {
     setStatusErr('')
     const idx = STATES.indexOf(o.status)
     if (idx < 0 || o.status === 'shipped') return
-    setStatusDate(o.status === 'preorder' ? shipDateOf(o) : formatDate(new Date())) // 確認訂單：帶入預計出貨日
+    if (o.status === 'preorder') { // 確認訂單：帶入預計出貨日、併櫃（這張沒填的話，用同客戶同出貨日的單）
+      let m = mergeOf(o)
+      if (!m.on) { const sib = orders.find(x => x.id !== o.id && x.status !== LOST && batchKey(x) === batchKey(o) && x.cs?.merge?.on); if (sib) m = mergeOf(sib) }
+      setStatusMerge(m)
+      setStatusDate(shipDateOf(o) || mergeShipDate(m))
+    } else setStatusDate(formatDate(new Date()))
     setStatusModal({ order: o, nextStatus: STATES[idx + 1], label: NEXT_ACTION[o.status] })
+  }
+  const setStatusMergeP = patch => {
+    const m = { ...statusMerge, ...patch }
+    setStatusMerge(m); setStatusErr('')
+    if ('date' in patch || 'on' in patch) { const sd = mergeShipDate(m); if (sd) setStatusDate(sd) }
+  }
+
+  // ── Google 日曆：一批出貨（同客戶同出貨日、已確認的單）──
+  // 標題：達頓出貨12/2併（沒併櫃：達頓出貨）；內容：併櫃、地點、出貨內容
+  const batchCal = key => {
+    const all = batches[key] || []
+    const list = all.filter(o => o.status !== 'preorder')
+    const pre = all.filter(o => o.status === 'preorder')
+    if (!list.length) return { list, pre }
+    const o0 = list[0], td = shipDateOf(o0)
+    const m = list.map(mergeOf).find(x => x.on && x.date) || null
+    const place = m?.place ? places.find(x => x.name === m.place) : null
+    const title = `${parentOf(o0)}出貨${m ? `${mdOf(m.date)}併` : ''}`
+    const names = uniq(list.map(o => o.customer_name || o.customerName))
+    const bags = list.reduce((s, o) => s + (Number(o.quantity) || 0), 0)
+    const boxes = list.reduce((s, o) => s + getBoxCount(o), 0)
+    const lines = []
+    if (m) lines.push(`併櫃：${mdw(m.date)}${m.time ? ` ${m.time}` : ''}`)
+    if (m?.place) { lines.push(m.place); if (place?.detail) lines.push(place.detail) }
+    if (lines.length) lines.push('')
+    lines.push('出貨內容：')
+    list.forEach(o => { const b = getBoxCount(o); lines.push(`• ${o.item_name || o.itemName} ${o.quantity}袋${b ? `（${b}箱）` : ''}${names.length > 1 ? ` — ${o.customer_name || o.customerName}` : ''}`) })
+    lines.push(`合計：${bags}袋${boxes ? `・${boxes}箱` : ''}`)
+    lines.push('', `詳情依「生產排程整合系統」為主：${window.location.origin}`)
+    const details = lines.join('\n')
+    const cal = list.map(o => o.cs || {}).find(c => c.calAt && c.calDate === td) || null
+    return { list, pre, td, title, details, url: td ? gcalUrl(title, td, details) : '', cal, m }
+  }
+  // 按下「加入 Google 日曆」：整批記下已加（之後再按會提醒已經加過）
+  const markCal = async info => {
+    const now = new Date().toISOString()
+    const ids = new Set(info.list.map(o => o.id))
+    const upd = o => ({ ...(o.cs || {}), calAt: now, calBy: me, calDate: info.td })
+    setOrders(l => l.map(o => (ids.has(o.id) ? { ...o, cs: upd(o) } : o)))
+    setCalFor(null)
+    showToast('已開 Google 日曆，在那邊按「儲存」✅')
+    for (const o of info.list) await updateOrder(o.id, { cs: upd(o), updated_at: now }, '日曆紀錄沒存到：')
   }
 
   const THEME = {
@@ -579,6 +768,87 @@ export default function OrdersPage({ user }) {
     const its = packItems(mo, getBoxCount(mo))
     return { total: its.length, left: its.filter(it => !it.done) }
   })() : null
+
+  // 併櫃欄位（新增客訂表單、確認訂單視窗共用；用函式呼叫，不寫成元件，打字才不會跳掉）
+  const renderMerge = (m, set, shipIso, manage) => {
+    const sd = mergeShipDate(m)
+    const pl = places.find(x => x.name === m.place)
+    const box = { width: '100%', background: '#fff', border: 'none', borderRadius: 10, padding: '8px', fontFamily: 'inherit' }
+    return (
+      <div style={{ background: '#f0f9ff', border: '1px solid #bae6fd', borderRadius: 16, padding: 12, marginBottom: 12 }}>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: 13, fontWeight: 800, color: '#0369a1' }}>
+          <input type="checkbox" checked={!!m.on} onChange={e => set({ on: e.target.checked })} style={{ width: 16, height: 16 }} aria-label="這批要併櫃" />
+          🚢 這批要併櫃<span style={{ fontWeight: 500, color: '#64748b', fontSize: 12 }}>（出貨日＝併櫃前 {MERGE_LEAD} 個工作天）</span>
+        </label>
+        {m.on && (
+          <div style={{ marginTop: 8 }}>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+              <div>
+                <div style={{ fontSize: 12, color: '#0369a1', marginBottom: 3 }}>併櫃日期 *</div>
+                <input type="date" value={m.date} onChange={e => set({ date: e.target.value })} aria-label="併櫃日期" style={{ ...box, border: m.date ? 'none' : '1px solid #f59e0b' }} />
+              </div>
+              <div>
+                <div style={{ fontSize: 12, color: '#0369a1', marginBottom: 3 }}>併櫃時間</div>
+                <div style={{ display: 'flex', gap: 4 }}>
+                  {MERGE_TIMES.map(t => (
+                    <button type="button" key={t} onClick={() => set({ time: m.time === t ? '' : t })} aria-pressed={m.time === t}
+                      style={{ flex: 1, padding: '8px 2px', borderRadius: 10, border: `1px solid ${m.time === t ? '#0369a1' : '#bae6fd'}`, background: m.time === t ? '#0369a1' : '#fff', color: m.time === t ? '#fff' : '#0369a1', fontWeight: 800, fontSize: 12, cursor: 'pointer', fontFamily: 'inherit', whiteSpace: 'nowrap' }}>{t}</button>
+                  ))}
+                </div>
+              </div>
+            </div>
+            <input value={MERGE_TIMES.includes(m.time) ? '' : m.time} onChange={e => set({ time: e.target.value })} placeholder="其他時間（例：下午2點）" aria-label="其他併櫃時間"
+              style={{ ...box, marginTop: 6, fontSize: 13, padding: '6px 8px' }} />
+            {sd && (
+              <div style={{ marginTop: 6, fontSize: 13, fontWeight: 700, color: '#0369a1' }}>
+                → 出貨日 {mdw(sd)}（已避開週末、國定假日）
+                {shipIso && shipIso !== sd && <span style={{ color: '#c2410c' }}>；目前出貨日是 {mdw(shipIso)}</span>}
+              </div>
+            )}
+            <div style={{ fontSize: 12, color: '#0369a1', margin: '8px 0 3px' }}>併櫃地點</div>
+            <div style={{ display: 'flex', gap: 6 }}>
+              <select value={m.place} onChange={e => set({ place: e.target.value })} aria-label="併櫃地點" style={{ ...box, flex: 1, width: 'auto', minWidth: 0 }}>
+                <option value="">請選擇（日曆上會寫地址）</option>
+                {places.map(x => <option key={x.name} value={x.name}>{x.name}</option>)}
+                {m.place && !pl && <option value={m.place}>{m.place}（已從清單刪除）</option>}
+              </select>
+              {manage && (
+                <button type="button" onClick={() => { setPlaceOpen(!placeOpen); setPlaceDraft({ name: '', detail: '' }) }} aria-expanded={placeOpen}
+                  style={{ background: placeOpen ? '#e0f2fe' : '#fff', border: '1px dashed #7dd3fc', borderRadius: 10, padding: '0 10px', color: '#0369a1', fontWeight: 700, cursor: 'pointer', fontSize: 13, fontFamily: 'inherit', whiteSpace: 'nowrap' }}>＋ 新增／管理地點</button>
+              )}
+            </div>
+            {pl?.detail && <div style={{ marginTop: 6, fontSize: 12, color: '#334155', background: '#fff', borderRadius: 8, padding: '6px 8px', whiteSpace: 'pre-wrap', lineHeight: 1.5 }}>{pl.detail}</div>}
+            {manage && placeOpen && (
+              <div style={{ background: '#fff', border: '1px solid #bae6fd', borderRadius: 10, padding: 8, marginTop: 6 }}>
+                <input value={placeDraft.name} onChange={e => setPlaceDraft(d => ({ ...d, name: e.target.value }))} placeholder="地點名稱（例：逢泰低溫物流中心）" aria-label="地點名稱"
+                  style={{ ...box, border: '1px solid #bae6fd', fontSize: 14, marginBottom: 6 }} />
+                <textarea value={placeDraft.detail} onChange={e => setPlaceDraft(d => ({ ...d, detail: e.target.value }))} rows={4} aria-label="地點說明"
+                  placeholder={'地址、聯絡人、電話、注意事項（會寫進日曆）\n例：桃園蘆竹區海湖北路282號 (海湖倉)\n倉庫電話：…\n**中午休息時間，請勿送貨!!**'}
+                  style={{ ...box, border: '1px solid #bae6fd', fontSize: 13, resize: 'vertical' }} />
+                <div style={{ display: 'flex', gap: 6, marginTop: 6 }}>
+                  <button type="button" onClick={savePlace} style={{ flex: 1, background: '#0369a1', color: '#fff', border: 'none', borderRadius: 8, padding: '7px 0', fontWeight: 800, cursor: 'pointer', fontFamily: 'inherit' }}>儲存地點</button>
+                  <button type="button" onClick={() => setPlaceOpen(false)} style={{ background: '#f1f5f9', color: '#64748b', border: 'none', borderRadius: 8, padding: '7px 12px', fontWeight: 700, cursor: 'pointer', fontFamily: 'inherit' }}>收起</button>
+                </div>
+                {places.length > 0 && (
+                  <>
+                    <div style={{ fontSize: 12, color: '#0369a1', margin: '8px 0 4px' }}>清單（按名稱可以修改，按 × 刪除）：</div>
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                      {places.map(x => (
+                        <span key={x.name} style={{ display: 'inline-flex', alignItems: 'center', background: '#f0f9ff', border: '1px solid #bae6fd', borderRadius: 20, fontSize: 13, fontWeight: 700, color: '#075985' }}>
+                          <button type="button" onClick={() => setPlaceDraft({ name: x.name, detail: x.detail || '' })} title="修改這個地點" style={{ border: 'none', background: 'none', color: 'inherit', fontWeight: 700, cursor: 'pointer', padding: '2px 4px 2px 10px', fontFamily: 'inherit', fontSize: 13 }}>{x.name}</button>
+                          <button type="button" onClick={() => deletePlace(x.name)} aria-label={`刪除地點 ${x.name}`} title="從清單刪除" style={{ border: 'none', background: 'none', color: '#7dd3fc', cursor: 'pointer', fontSize: 15, lineHeight: 1, padding: '0 8px 0 2px' }}>×</button>
+                        </span>
+                      ))}
+                    </div>
+                  </>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    )
+  }
 
   // 異常狀態分頁內容（用函式呼叫，不寫成元件，避免重建）
   // ── 預排客訂（客戶服務科）──
@@ -810,7 +1080,7 @@ export default function OrdersPage({ user }) {
       <div style={{ background: th.header, color: '#fff', padding: '12px 16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <h2 style={{ fontSize: 16, fontWeight: 900 }}>🥟 客訂管理系統</h2>
         <div style={{ display: 'flex', gap: 8 }}>
-          <button onClick={() => { setEditingConfigs([...savedItems]); setIsSettingsOpen(true) }} style={{ background: 'rgba(255,255,255,.2)', border: 'none', borderRadius: '50%', width: 34, height: 34, cursor: 'pointer', fontSize: 16 }}>⚙️</button>
+          <button onClick={openSettings} title="品項管理（每袋重量、每箱袋數、代工品）" aria-label="品項管理" style={{ background: 'rgba(255,255,255,.2)', border: 'none', borderRadius: '50%', width: 34, height: 34, cursor: 'pointer', fontSize: 16 }}>⚙️</button>
           <button onClick={() => { closeForm(); setCsDraft({ next: addDays(todayIso(), 1), note: '' }); setIsFormOpen(true) }} style={{ background: '#fff', color: '#1e293b', border: 'none', padding: '6px 14px', borderRadius: 20, fontWeight: 700, fontSize: 15, cursor: 'pointer' }}>新增客訂</button>
         </div>
       </div>
@@ -867,24 +1137,54 @@ export default function OrdersPage({ user }) {
         )}
 
         {activeTab === 'preorder' && renderCsPanel()}
-        {activeTab === ANOMALY ? renderAnomaly() : Object.keys(groupedByCustomer).length === 0
+        {activeTab === ANOMALY ? renderAnomaly() : groupList.length === 0
             ? <div style={{ textAlign: 'center', padding: '60px 0', color: '#94a3b8', fontStyle: 'italic' }}>{activeTab === 'preorder' ? '目前沒有預排客訂。新接的單按右上「新增客訂」放進來。' : '目前無資料'}</div>
-            : <div className="op-cards">{Object.entries(groupedByCustomer).map(([parentName, group]) => {
+            : <div className="op-cards">{groupList.map(([gKey, group]) => {
               const allOrders = group.all || []
+              const parentName = group.parent
               const subGroups = group.subGroups || { [parentName]: allOrders }
-              const totalQty = allOrders.reduce((s, o) => s + Number(o.quantity), 0)
               const hasMultipleSub = Object.keys(subGroups).length > 1
+              // 整批（同客戶同出貨日，含已經到其他關卡的單）
+              const batch = batches[gKey] || allOrders
+              const others = batch.filter(o => o.status !== activeTab)
+              const otherBy = others.reduce((m, o) => ({ ...m, [o.status]: (m[o.status] || 0) + 1 }), {})
+              const bPkg = batch.reduce((s, o) => s + getPkgCount(o), 0)
+              const bBox = batch.reduce((s, o) => s + getBoxCount(o), 0)
+              const bm = batch.map(mergeOf).find(x => x.on && x.date)
+              const bcal = batch.map(o => o.cs || {}).find(c => c.calAt && c.calDate === group.td)
+              const canCal = ACTIVE.includes(activeTab) && !!group.td
               return (
-              <div key={parentName} style={{ background: '#fff', borderRadius: 24, border: `1px solid ${th.border}`, overflow: 'hidden', marginBottom: 16, breakInside: 'avoid' }}>
-                {/* 母客戶標題列 */}
-                <div style={{ background: th.header, padding: '10px 16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                  <span style={{ fontSize: 16, fontWeight: 900, color: '#fff' }}>{parentName}</span>
-<span style={{ fontSize: 13, color: 'rgba(255,255,255,.8)', fontWeight: 700 }}>{(() => {
-                    const totalPkg2 = allOrders.reduce((s,o) => s + getPkgCount(o), 0)
-                    const totalBox2 = allOrders.reduce((s,o) => s + getBoxCount(o), 0)
-                    return `共${allOrders.length}筆・${totalPkg2}包${totalBox2 > 0 ? `・${totalBox2}箱` : ''}`
-                  })()}</span>
+              <div key={gKey} style={{ background: '#fff', borderRadius: 24, border: `1px solid ${th.border}`, overflow: 'hidden', marginBottom: 16, breakInside: 'avoid' }}>
+                {/* 母客戶＋出貨日標題列：筆數、包數、箱數算整批 */}
+                <div style={{ background: th.header, padding: '10px 16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                    <span className="op-batch-name" style={{ fontSize: 16, fontWeight: 900, color: '#fff' }}>{hasMultipleSub ? parentName : Object.keys(subGroups)[0]}</span>
+                    <span style={{ fontSize: 12, fontWeight: 800, color: '#fff', background: 'rgba(255,255,255,.22)', borderRadius: 10, padding: '1px 8px' }}>{group.td ? `${mdw(group.td)} 出貨` : '出貨日未定'}</span>
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <span className="op-batch-total" style={{ fontSize: 13, color: 'rgba(255,255,255,.92)', fontWeight: 700 }}>共{batch.length}筆・{bPkg}包{bBox > 0 ? `・${bBox}箱` : ''}</span>
+                    {canCal && (
+                      <button onClick={() => setCalFor({ key: gKey, confirmed: false })} title={bcal ? '已加過 Google 日曆（可以再加）' : '加入 Google 日曆'} aria-label="這批出貨加入 Google 日曆"
+                        style={{ background: 'rgba(255,255,255,.22)', border: 'none', borderRadius: 8, color: '#fff', fontSize: 13, fontWeight: 800, padding: '3px 8px', cursor: 'pointer', fontFamily: 'inherit', whiteSpace: 'nowrap' }}>📅{bcal ? ' 已加' : ''}</button>
+                    )}
+                  </div>
                 </div>
+                {(others.length > 0 || bm) && (
+                  <div className="op-batch-strip" style={{ background: th.bg, borderBottom: `1px solid ${th.border}`, padding: '6px 16px', fontSize: 13, color: th.accent, display: 'flex', flexWrap: 'wrap', gap: '4px 12px', alignItems: 'center' }}>
+                    {bm && <span style={{ fontWeight: 800 }}>🚢 {mergeTxt(bm)}</span>}
+                    {others.length > 0 && (
+                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                        本區 {allOrders.length} 筆，同批另有
+                        {Object.entries(otherBy).map(([st, n]) => (
+                          <button key={st} onClick={() => setActiveTab(st)} title={`切到「${STATUS_LABEL[st]}」`}
+                            style={{ background: '#fff', border: `1px solid ${th.border}`, borderRadius: 10, padding: '0 8px', fontSize: 12, fontWeight: 800, color: th.accent, cursor: 'pointer', fontFamily: 'inherit' }}>
+                            {n} 筆在「{STATUS_LABEL[st]}」
+                          </button>
+                        ))}
+                      </span>
+                    )}
+                  </div>
+                )}
                 {/* 各子客戶 */}
                 {Object.entries(subGroups).map(([subName, list]) => (
                 <div key={subName} style={{ borderBottom: `1px solid ${th.border}` }}>
@@ -894,6 +1194,7 @@ export default function OrdersPage({ user }) {
                         <span style={{ fontSize: 14, fontWeight: 700, color: '#475569' }}>{subName}</span>
                         {list[0]?.shipping_mark && <span style={{ fontSize: 11, background: '#fef2f2', color: '#ef4444', padding: '1px 7px', borderRadius: 20, fontWeight: 700 }}>🏷️ 一般麥頭</span>}
                         {list[0]?.color_mark && <span style={{ fontSize: 11, background: '#fdf4ff', color: '#7e22ce', padding: '1px 7px', borderRadius: 20, fontWeight: 700 }}>🎨 彩色{list[0]?.color_mark_note ? `(${list[0].color_mark_note})` : ''}</span>}
+                        {list[0]?.pack?.carton && <span style={{ fontSize: 11, background: '#ecfeff', color: '#0e7490', padding: '1px 7px', borderRadius: 20, fontWeight: 700 }}>📌 外箱貼</span>}
                       </div>
 <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
                         {(() => {
@@ -921,6 +1222,7 @@ export default function OrdersPage({ user }) {
                           <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap' }}>
                             {(o.is_mixed_box||o.isMixedBox) && <span style={{ fontSize: 12, background: '#fef3c7', color: '#92400e', padding: '2px 8px', borderRadius: 6, fontWeight: 700 }}>併箱</span>}
                             <span style={{ fontSize: 12, background: '#f1f5f9', color: '#64748b', padding: '2px 8px', borderRadius: 6 }}>{o.weight_per_bag || 5250}g/袋</span>
+                            {pk.oem && <span title="代工品：不進生產排程、不扣庫存" style={{ fontSize: 12, background: '#fef3c7', color: '#92400e', padding: '2px 8px', borderRadius: 6, fontWeight: 800 }}>🏭 代工品</span>}
                           </div>
                         </div>
                         <div style={{ textAlign: 'right' }}>
@@ -934,6 +1236,7 @@ export default function OrdersPage({ user }) {
                           {(o.box_type||o.boxType) && <span style={{ fontSize: 12, background: '#eff6ff', color: '#1d4ed8', padding: '2px 8px', borderRadius: 6, fontWeight: 700 }}>{o.box_type||o.boxType}</span>}
                           {!hasMultipleSub && (o.shipping_mark||o.shippingMark) && <span style={{ fontSize: 12, background: '#fef2f2', color: '#ef4444', padding: '2px 8px', borderRadius: 6, fontWeight: 700 }}>🏷️ 一般麥頭</span>}
                           {!hasMultipleSub && o.color_mark && <span style={{ fontSize: 12, background: '#fdf4ff', color: '#7e22ce', padding: '2px 8px', borderRadius: 6, fontWeight: 700 }}>🎨 彩色麥頭{o.color_mark_note ? `(${o.color_mark_note})` : ''}</span>}
+                          {pk.carton && <span style={{ fontSize: 12, background: '#ecfeff', color: '#0e7490', padding: '2px 8px', borderRadius: 6, fontWeight: 700 }}>📌 外箱貼{pk.cartonNote ? `(${pk.cartonNote})` : ''}</span>}
                           {pk.inner && <span style={{ fontSize: 12, background: '#f5f3ff', color: '#6d28d9', padding: '2px 8px', borderRadius: 6, fontWeight: 700 }}>🛍 {innerTxt(pk)}</span>}
                           {pk.sticker && <span style={{ fontSize: 12, background: '#fffbeb', color: '#b45309', padding: '2px 8px', borderRadius: 6, fontWeight: 700 }}>🏷 貼紙 {stickerTxt(pk)}</span>}
                         </>}
@@ -982,7 +1285,7 @@ export default function OrdersPage({ user }) {
                 {/* 總計列 */}
                 {hasMultipleSub && (
                   <div style={{ background: '#f8fafc', padding: '10px 16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                    <span style={{ fontSize: 13, color: '#64748b', fontWeight: 700 }}>合計</span>
+                    <span style={{ fontSize: 13, color: '#64748b', fontWeight: 700 }}>{others.length ? '本區合計' : '合計'}</span>
   <span style={{ fontSize: 15, fontWeight: 900, color: th.accent }}>{(() => {
                       const fPkg = allOrders.reduce((s,o) => s + getPkgCount(o), 0)
                       const fBox = allOrders.reduce((s,o) => s + getBoxCount(o), 0)
@@ -1024,18 +1327,35 @@ export default function OrdersPage({ user }) {
       {/* 設定 */}
       {isSettingsOpen && (
         <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,.6)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 50, padding: 16 }}>
-          <div style={{ background: '#fff', width: '100%', maxWidth: 400, borderRadius: 28, padding: 24, maxHeight: '80vh', overflowY: 'auto' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-              <h2 style={{ fontSize: 16, fontWeight: 900 }}>口味品名管理</h2>
+          <div style={{ background: '#fff', width: '100%', maxWidth: 460, borderRadius: 28, padding: 24, maxHeight: '85vh', overflowY: 'auto' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+              <h2 style={{ fontSize: 16, fontWeight: 900 }}>品項管理</h2>
               <button onClick={() => setIsSettingsOpen(false)} style={{ background: '#f1f5f9', border: 'none', borderRadius: '50%', width: 32, height: 32, cursor: 'pointer' }}>✕</button>
             </div>
-            {editingConfigs.map((item, i) => (
-              <div key={i} style={{ display: 'flex', gap: 6, marginBottom: 8 }}>
-                <input type="text" value={item} onChange={e => { const n = [...editingConfigs]; n[i] = e.target.value; setEditingConfigs(n) }} style={{ flex: 1, background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 8, padding: '8px 10px', fontWeight: 700, color: '#4f46e5', fontFamily: 'inherit' }} />
-                <button type="button" onClick={() => setEditingConfigs(editingConfigs.filter((_, j) => j !== i))} style={{ background: '#fef2f2', border: 'none', borderRadius: 8, padding: '0 10px', color: '#ef4444', cursor: 'pointer' }}>✕</button>
-              </div>
-            ))}
-            <button type="button" onClick={() => setEditingConfigs([...editingConfigs, ''])} style={{ width: '100%', padding: '8px', background: '#f8fafc', border: '1px dashed #e2e8f0', borderRadius: 10, color: '#6366f1', fontWeight: 700, cursor: 'pointer', marginBottom: 12 }}>+ 新增品名</button>
+            <div style={{ fontSize: 12, color: '#64748b', marginBottom: 12, lineHeight: 1.6 }}>
+              新增客訂選這個品項時，會自動帶入每袋重量、每箱袋數。勾「代工品」的（例：里仁剝皮辣椒）只在客訂管理跑流程，<b>不進生產排程、不扣庫存</b>。
+            </div>
+            {editingConfigs.map((c, i) => {
+              const set = patch => setEditingConfigs(list => list.map((x, j) => (j === i ? { ...x, ...patch } : x)))
+              const num = { width: 64, background: '#fff', border: '1px solid #e2e8f0', borderRadius: 8, padding: '5px 6px', fontFamily: 'inherit', fontSize: 14, textAlign: 'right' }
+              return (
+                <div key={i} className="op-spec-row" style={{ background: c.oem ? '#fffbeb' : '#f8fafc', border: `1px solid ${c.oem ? '#fde68a' : '#e2e8f0'}`, borderRadius: 12, padding: 8, marginBottom: 8 }}>
+                  <div style={{ display: 'flex', gap: 6 }}>
+                    <input type="text" value={c.name} onChange={e => set({ name: e.target.value })} placeholder="品名" aria-label="品名"
+                      style={{ flex: 1, minWidth: 0, background: '#fff', border: '1px solid #e2e8f0', borderRadius: 8, padding: '7px 10px', fontWeight: 700, color: '#4f46e5', fontFamily: 'inherit' }} />
+                    <button type="button" onClick={() => setEditingConfigs(list => list.filter((_, j) => j !== i))} aria-label={`刪除品項 ${c.name}`} style={{ background: '#fef2f2', border: 'none', borderRadius: 8, padding: '0 10px', color: '#ef4444', cursor: 'pointer' }}>✕</button>
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', marginTop: 6, fontSize: 13, color: '#475569' }}>
+                    每袋<input type="number" value={c.g} onChange={e => set({ g: e.target.value })} aria-label={`${c.name} 每袋重量`} style={num} />g
+                    <span style={{ marginLeft: 4 }}>每箱</span><input type="number" value={c.perBox} onChange={e => set({ perBox: e.target.value })} aria-label={`${c.name} 每箱袋數`} style={{ ...num, width: 52 }} />袋
+                    <label style={{ display: 'inline-flex', alignItems: 'center', gap: 4, marginLeft: 'auto', fontWeight: 800, color: c.oem ? '#92400e' : '#64748b', cursor: 'pointer' }}>
+                      <input type="checkbox" checked={!!c.oem} onChange={e => set({ oem: e.target.checked })} aria-label={`${c.name} 代工品`} style={{ width: 15, height: 15 }} />代工品
+                    </label>
+                  </div>
+                </div>
+              )
+            })}
+            <button type="button" onClick={() => setEditingConfigs([...editingConfigs, { name: '', g: '', perBox: '', oem: false }])} style={{ width: '100%', padding: '8px', background: '#f8fafc', border: '1px dashed #e2e8f0', borderRadius: 10, color: '#6366f1', fontWeight: 700, cursor: 'pointer', marginBottom: 12 }}>+ 新增品項</button>
             <button onClick={syncSettings} style={{ width: '100%', padding: '12px', background: '#1e293b', color: '#fff', border: 'none', borderRadius: 16, fontWeight: 900, fontSize: 15, cursor: 'pointer' }}>確認並同步</button>
           </div>
         </div>
@@ -1044,7 +1364,7 @@ export default function OrdersPage({ user }) {
       {/* 狀態日期 Modal */}
       {statusModal && (
         <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,.7)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 120, padding: 16 }}>
-          <div style={{ background: '#fff', width: '100%', maxWidth: 320, borderRadius: 24, padding: 24 }}>
+          <div style={{ background: '#fff', width: '100%', maxWidth: statusModal.order.status === 'preorder' ? 400 : 320, borderRadius: 24, padding: 24, maxHeight: '92vh', overflowY: 'auto' }}>
             <h2 style={{ fontSize: 16, fontWeight: 900, marginBottom: 6 }}>{statusModal.label}</h2>
             <div style={{ fontSize: 13, color: '#64748b', marginBottom: 16 }}>
               {statusModal.order.customer_name || statusModal.order.customerName} ・ {statusModal.order.item_name || statusModal.order.itemName}
@@ -1061,6 +1381,7 @@ export default function OrdersPage({ user }) {
                 )}
               </div>
             )}
+            {statusModal.order.status === 'preorder' && renderMerge(statusMerge, setStatusMergeP, statusDate, false)}
             {STAGE[statusModal.order.status]?.dateLabel && (
             <div style={{ marginBottom: 16 }}>
               <div style={{ fontSize: 13, color: '#94a3b8', fontWeight: 700, marginBottom: 6 }}>
@@ -1077,13 +1398,22 @@ export default function OrdersPage({ user }) {
                 const o = statusModal.order, now = new Date().toISOString()
                 const updateData = { status: statusModal.nextStatus, updated_at: now }
                 if (o.status === 'pending') updateData.scheduled_date = statusDate
-                if (o.status === 'preorder') { // 確認訂單：出貨日一定要填，記下誰、什麼時候確認
+                if (o.status === 'preorder') { // 確認訂單：出貨日一定要填，記下誰、什麼時候確認；有併櫃一起存
+                  if (statusMerge.on && !statusMerge.date) { setStatusErr('請填併櫃日期（不併櫃的話把勾勾取消）'); return }
                   if (!statusDate) { setStatusErr('請填確認出貨日'); return }
                   updateData.target_date = statusDate
-                  updateData.cs = { ...(o.cs || {}), receivedAt: o.cs?.receivedAt || o.created_at, owner: o.cs?.owner || me, confirmedAt: now, confirmedBy: me, next: '' }
+                  const cs = { ...(o.cs || {}), receivedAt: o.cs?.receivedAt || o.created_at, owner: o.cs?.owner || me, confirmedAt: now, confirmedBy: me, next: '' }
+                  if (statusMerge.on) cs.merge = { on: true, date: statusMerge.date, time: (statusMerge.time || '').trim(), place: statusMerge.place || '' }
+                  else delete cs.merge
+                  updateData.cs = cs
                 }
                 const { error } = await updateOrder(o.id, updateData, '狀態已更新，但')
                 if (error) { alert('狀態更新失敗：' + error.message); return }
+                if (o.status === 'preorder') { // 轉到等待排程後，問要不要加 Google 日曆
+                  const up = { ...o, ...updateData }
+                  setOrders(l => l.map(x => (x.id === o.id ? up : x)))
+                  setCalFor({ key: batchKey(up), confirmed: true })
+                }
                 fetchOrders()
                 showToast(`${statusModal.label} ✅`)
                 setStatusModal(null)
@@ -1092,6 +1422,50 @@ export default function OrdersPage({ user }) {
           </div>
         </div>
       )}
+
+      {/* Google 日曆提醒：確認訂單後（或卡片上的 📅） */}
+      {calFor && (() => {
+        const info = batchCal(calFor.key)
+        const preNames = uniq(info.pre.map(o => o.item_name || o.itemName)).join('、')
+        return (
+          <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,.7)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 125, padding: 16 }}>
+            <div role="dialog" aria-label="加入 Google 日曆" style={{ background: '#fff', width: '100%', maxWidth: 400, borderRadius: 24, padding: 22, maxHeight: '92vh', overflowY: 'auto' }}>
+              {calFor.confirmed && <div style={{ fontSize: 14, fontWeight: 800, color: '#047857', marginBottom: 6 }}>✅ 已確認訂單，轉到「等待排程」</div>}
+              <h2 style={{ fontSize: 16, fontWeight: 900, marginBottom: 4 }}>📅 要把這批出貨加到 Google 日曆嗎？</h2>
+              <div style={{ fontSize: 13, color: '#64748b', marginBottom: 12 }}>客服看日曆就知道哪天要安排出貨。</div>
+              {info.list.length === 0 ? (
+                <div style={{ fontSize: 14, color: '#475569', background: '#f8fafc', borderRadius: 12, padding: 12 }}>這批還沒有確認過的單，確認訂單後再加。</div>
+              ) : (
+                <>
+                  <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 12, padding: '10px 12px', marginBottom: 10 }}>
+                    <div style={{ fontSize: 12, color: '#64748b' }}>{mdw(info.td)}　整天</div>
+                    <div className="op-cal-title" style={{ fontSize: 17, fontWeight: 900, color: '#1e293b', margin: '2px 0 6px' }}>{info.title}</div>
+                    <div className="op-cal-details" style={{ fontSize: 12.5, color: '#334155', whiteSpace: 'pre-wrap', lineHeight: 1.6, maxHeight: 230, overflowY: 'auto' }}>{info.details}</div>
+                  </div>
+                  {info.pre.length > 0 && (
+                    <div style={{ fontSize: 13, fontWeight: 700, color: '#b45309', background: '#fffbeb', borderRadius: 10, padding: '8px 10px', marginBottom: 8 }}>
+                      ⚠ 同一批還有 {info.pre.length} 筆在「預排客訂」還沒確認（{preNames}），日曆上不會列；建議全部確認後再加。
+                    </div>
+                  )}
+                  {info.cal && (
+                    <div style={{ fontSize: 13, fontWeight: 700, color: '#0369a1', background: '#f0f9ff', borderRadius: 10, padding: '8px 10px', marginBottom: 8 }}>
+                      ℹ 這批 {mdOf(info.td)} 已經加過日曆（{fmtMDHM(info.cal.calAt)} {info.cal.calBy}），再加會多一個活動。
+                    </div>
+                  )}
+                </>
+              )}
+              <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+                <button onClick={() => setCalFor(null)} style={{ flex: 1, padding: '11px', background: '#f1f5f9', border: 'none', borderRadius: 12, fontWeight: 700, color: '#64748b', cursor: 'pointer', fontFamily: 'inherit' }}>{info.list.length ? '先不要' : '關閉'}</button>
+                {info.url && (
+                  <a href={info.url} target="_blank" rel="noreferrer" onClick={() => markCal(info)}
+                    style={{ flex: 2, padding: '11px', background: '#2563eb', color: '#fff', borderRadius: 12, fontWeight: 900, textAlign: 'center', textDecoration: 'none' }}>📅 {info.cal ? '再加一次' : '加入 Google 日曆'}</a>
+                )}
+              </div>
+              {info.url && <div style={{ fontSize: 12, color: '#94a3b8', marginTop: 8 }}>會開 Google 日曆的新增活動頁，可以在那裡選「銷貨科-預定出貨清單」再按儲存。</div>}
+            </div>
+          </div>
+        )
+      })()}
 
       {/* 確認視窗 */}
       {isConfirmOpen && pendingOrderData && (
@@ -1122,6 +1496,9 @@ export default function OrdersPage({ user }) {
               {pendingOrderData.color_mark && <div style={{ background: '#fdf4ff', borderRadius: 8, padding: '6px 10px', fontSize: 13, fontWeight: 700, color: '#7e22ce' }}>🎨 彩色麥頭{pendingOrderData.color_mark_note ? `(${pendingOrderData.color_mark_note})` : ''}</div>}
               {pendingOrderData.pack?.inner && <div style={{ background: '#f5f3ff', borderRadius: 8, padding: '6px 10px', fontSize: 13, fontWeight: 700, color: '#6d28d9' }}>🛍 {innerTxt(pendingOrderData.pack)}</div>}
               {pendingOrderData.pack?.sticker && <div style={{ background: '#fffbeb', borderRadius: 8, padding: '6px 10px', fontSize: 13, fontWeight: 700, color: '#b45309' }}>🏷 貼紙 {stickerTxt(pendingOrderData.pack)}</div>}
+              {pendingOrderData.pack?.carton && <div style={{ background: '#ecfeff', borderRadius: 8, padding: '6px 10px', fontSize: 13, fontWeight: 700, color: '#0e7490' }}>📌 外箱貼{pendingOrderData.pack.cartonNote ? `(${pendingOrderData.pack.cartonNote})` : ''}</div>}
+              {pendingOrderData.pack?.oem && <div style={{ background: '#fef3c7', borderRadius: 8, padding: '6px 10px', fontSize: 13, fontWeight: 800, color: '#92400e' }}>🏭 代工品（不進生產排程、庫存）</div>}
+              {pendingOrderData.merge?.on && <div style={{ background: '#f0f9ff', borderRadius: 8, padding: '6px 10px', fontSize: 13, fontWeight: 700, color: '#0369a1' }}>🚢 {mergeTxt(pendingOrderData.merge)}</div>}
             </div>
             <button onClick={executeSave} style={{ width: '100%', padding: '12px', background: '#059669', color: '#fff', border: 'none', borderRadius: 16, fontWeight: 900, fontSize: 15, cursor: 'pointer', marginBottom: 8 }}>確認無誤，正式存檔</button>
             <button onClick={() => setIsConfirmOpen(false)} style={{ width: '100%', padding: '10px', background: '#f1f5f9', color: '#64748b', border: 'none', borderRadius: 16, fontWeight: 700, cursor: 'pointer' }}>返回修改</button>
@@ -1155,6 +1532,8 @@ export default function OrdersPage({ user }) {
                 <input type="date" name="target_date" value={formData.target_date} onChange={handleInputChange} style={{ width: '100%', background: '#fef2f2', border: 'none', borderRadius: 12, padding: '10px', fontFamily: 'inherit' }} />
               </div>
             </div>
+
+            {renderMerge({ ...EMPTY_MERGE, ...(formData.merge || {}) }, setMerge, formData.target_date, true)}
 
             {!editingOrderId && (
               <div style={{ background: '#ecfeff', borderRadius: 16, padding: 14, marginBottom: 12 }}>
@@ -1204,18 +1583,26 @@ export default function OrdersPage({ user }) {
                     else { setUseBoxCalc(false); setBoxQtyInput('') }
                   }} style={{ width: '100%', background: '#fff', border: 'none', borderRadius: 10, padding: '8px', fontFamily: 'inherit' }} placeholder="例如：5（填了自動換算）" />
               </div>
-              <div style={{ display: 'flex', gap: 8 }}>
-                <label style={{ display: 'flex', alignItems: 'center', gap: 6, background: '#fff', padding: '7px 10px', borderRadius: 10, cursor: 'pointer', flex: 1 }}>
-                  <input type="checkbox" name="shipping_mark" checked={formData.shipping_mark} onChange={handleInputChange} style={{ width: 15, height: 15 }} />
-                  <span style={{ fontSize: 13, fontWeight: 700, color: '#ef4444' }}>🏷️ 一般麥頭</span>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 6 }}>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 5, background: '#fff', padding: '7px 8px', borderRadius: 10, cursor: 'pointer' }}>
+                  <input type="checkbox" name="shipping_mark" checked={formData.shipping_mark} onChange={handleInputChange} style={{ width: 15, height: 15, flexShrink: 0 }} />
+                  <span style={{ fontSize: 13, fontWeight: 700, color: '#ef4444', whiteSpace: 'nowrap' }}>🏷️ 一般麥頭</span>
                 </label>
-                <label style={{ display: 'flex', alignItems: 'center', gap: 6, background: '#fff', padding: '7px 10px', borderRadius: 10, cursor: 'pointer', flex: 1 }}>
-                  <input type="checkbox" name="color_mark" checked={formData.color_mark} onChange={handleInputChange} style={{ width: 15, height: 15 }} />
-                  <span style={{ fontSize: 13, fontWeight: 700, color: '#7e22ce' }}>🎨 彩色麥頭</span>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 5, background: '#fff', padding: '7px 8px', borderRadius: 10, cursor: 'pointer' }}>
+                  <input type="checkbox" name="color_mark" checked={formData.color_mark} onChange={handleInputChange} style={{ width: 15, height: 15, flexShrink: 0 }} />
+                  <span style={{ fontSize: 13, fontWeight: 700, color: '#7e22ce', whiteSpace: 'nowrap' }}>🎨 彩色麥頭</span>
+                </label>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 5, background: '#fff', padding: '7px 8px', borderRadius: 10, cursor: 'pointer' }}>
+                  <input type="checkbox" checked={!!formData.pack?.carton} onChange={e => setPack({ carton: e.target.checked })} aria-label="外箱貼" style={{ width: 15, height: 15, flexShrink: 0 }} />
+                  <span style={{ fontSize: 13, fontWeight: 700, color: '#0e7490', whiteSpace: 'nowrap' }}>📌 外箱貼</span>
                 </label>
               </div>
               {formData.color_mark && (
                 <input type="text" name="color_mark_note" value={formData.color_mark_note} onChange={handleInputChange} placeholder="顏色說明（例：紅色）" style={{ width: '100%', background: '#fff', border: 'none', borderRadius: 10, padding: '8px 10px', fontFamily: 'inherit', marginTop: 6, fontSize: 13 }} />
+              )}
+              {formData.pack?.carton && (
+                <input type="text" value={formData.pack?.cartonNote || ''} onChange={e => setPack({ cartonNote: e.target.value })} placeholder="外箱貼說明（選填，例：品名貼、條碼貼）" aria-label="外箱貼說明"
+                  style={{ width: '100%', background: '#fff', border: 'none', borderRadius: 10, padding: '8px 10px', fontFamily: 'inherit', marginTop: 6, fontSize: 13 }} />
               )}
             </div>
 
@@ -1300,21 +1687,44 @@ export default function OrdersPage({ user }) {
             })()}
 
             <div style={{ marginBottom: 12 }}>
-              <div style={{ fontSize: 13, color: '#94a3b8', fontWeight: 700, marginBottom: 4 }}>口味品項規格 *</div>
+              <div style={{ fontSize: 13, color: '#94a3b8', fontWeight: 700, marginBottom: 4 }}>品項規格 *<span style={{ fontWeight: 400, marginLeft: 6 }}>（打字搜尋或從清單選）</span></div>
               <div style={{ display: 'flex', gap: 6 }}>
-                <select name="item_name" value={formData.item_name} onChange={handleInputChange} style={{ flex: 1, background: '#f8fafc', border: 'none', borderRadius: 12, padding: '12px 14px', fontWeight: 700, fontFamily: 'inherit' }}>
-                  <option value="">請選擇規格</option>
-                  {savedItems.map(f => <option key={f} value={f}>{f}</option>)}
-                </select>
-                <button type="button" onClick={() => setIsAddingNewItem(true)} style={{ background: '#f1f5f9', border: 'none', borderRadius: 12, padding: '0 14px', fontWeight: 700, color: '#4f46e5', cursor: 'pointer' }}>+</button>
+                <input type="text" name="item_name" list="op-item-list" value={formData.item_name} onChange={e => pickItem(e.target.value)} placeholder="例：里仁剝皮辣椒" aria-label="品項規格" autoComplete="off"
+                  style={{ flex: 1, minWidth: 0, background: '#f8fafc', border: 'none', borderRadius: 12, padding: '12px 14px', fontWeight: 700, fontFamily: 'inherit', fontSize: 15 }} />
+                <datalist id="op-item-list">{savedItems.map(f => <option key={f} value={f} />)}</datalist>
+                <button type="button" onClick={() => { setIsAddingNewItem(true); setNewItem({ name: savedItems.includes(formData.item_name) ? '' : formData.item_name, g: '', perBox: '', oem: false }) }} title="新增品項到清單" aria-label="新增品項到清單"
+                  style={{ background: '#f1f5f9', border: 'none', borderRadius: 12, padding: '0 14px', fontWeight: 700, color: '#4f46e5', cursor: 'pointer' }}>+</button>
               </div>
+              {(() => { // 選到清單裡的品項：顯示帶入的規格
+                const nm = formData.item_name.trim()
+                if (!nm) return null
+                const sp = itemSpecs[nm]
+                if (!savedItems.includes(nm)) return <div style={{ fontSize: 12, color: '#94a3b8', marginTop: 4 }}>清單裡沒有這個品項，可以照打；要自動帶入規格請按「+」加進清單。</div>
+                if (!sp) return null
+                return (
+                  <div className="op-item-spec" style={{ fontSize: 12, color: '#4f46e5', marginTop: 4, fontWeight: 700 }}>
+                    📋 已帶入：{[sp.g ? `${sp.g}g/袋` : '', sp.perBox ? `每箱 ${sp.perBox} 袋` : ''].filter(Boolean).join('、') || '—'}
+                    {sp.oem && <span style={{ marginLeft: 6, color: '#92400e', background: '#fef3c7', borderRadius: 6, padding: '1px 6px' }}>🏭 代工品：不進生產排程、庫存</span>}
+                  </div>
+                )
+              })()}
             </div>
 
             {isAddingNewItem && (
-              <div style={{ display: 'flex', gap: 6, background: '#fffbeb', padding: 10, borderRadius: 12, marginBottom: 12 }}>
-                <input type="text" value={newItemName} onChange={e => setNewItemName(e.target.value)} placeholder="新規格名稱..." style={{ flex: 1, border: 'none', background: '#fff', borderRadius: 8, padding: '6px 10px', fontFamily: 'inherit' }} />
-                <button type="button" onClick={saveNewFlavor} style={{ background: '#d97706', color: '#fff', border: 'none', borderRadius: 8, padding: '0 12px', fontWeight: 700, cursor: 'pointer' }}>存</button>
-                <button type="button" onClick={() => setIsAddingNewItem(false)} style={{ color: '#94a3b8', border: 'none', background: 'none', cursor: 'pointer', padding: '0 6px' }}>✕</button>
+              <div style={{ background: '#fffbeb', padding: 10, borderRadius: 12, marginBottom: 12 }}>
+                <div style={{ display: 'flex', gap: 6 }}>
+                  <input type="text" value={newItem.name} onChange={e => setNewItem(x => ({ ...x, name: e.target.value }))} placeholder="新品項名稱（例：里仁剝皮辣椒）" aria-label="新品項名稱"
+                    style={{ flex: 1, minWidth: 0, border: 'none', background: '#fff', borderRadius: 8, padding: '6px 10px', fontFamily: 'inherit' }} />
+                  <button type="button" onClick={() => setIsAddingNewItem(false)} title="收起" style={{ color: '#94a3b8', border: 'none', background: 'none', cursor: 'pointer', padding: '0 6px' }}>✕</button>
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', marginTop: 6, fontSize: 13, color: '#92400e' }}>
+                  每袋<input type="number" value={newItem.g} onChange={e => setNewItem(x => ({ ...x, g: e.target.value }))} aria-label="新品項每袋重量" style={{ width: 64, border: 'none', background: '#fff', borderRadius: 8, padding: '5px 6px', fontFamily: 'inherit', textAlign: 'right' }} />g
+                  每箱<input type="number" value={newItem.perBox} onChange={e => setNewItem(x => ({ ...x, perBox: e.target.value }))} aria-label="新品項每箱袋數" style={{ width: 52, border: 'none', background: '#fff', borderRadius: 8, padding: '5px 6px', fontFamily: 'inherit', textAlign: 'right' }} />袋
+                  <label style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontWeight: 800, cursor: 'pointer' }}>
+                    <input type="checkbox" checked={newItem.oem} onChange={e => setNewItem(x => ({ ...x, oem: e.target.checked }))} aria-label="新品項是代工品" />代工品
+                  </label>
+                  <button type="button" onClick={saveNewFlavor} style={{ marginLeft: 'auto', background: '#d97706', color: '#fff', border: 'none', borderRadius: 8, padding: '6px 14px', fontWeight: 700, cursor: 'pointer', fontFamily: 'inherit' }}>存</button>
+                </div>
               </div>
             )}
 
