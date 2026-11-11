@@ -333,7 +333,7 @@ export default function SchedulePage() {
     return Object.fromEntries(L.all.map(f => [f, BAR_COLOR[f] || EXTRA_COLORS[k++ % EXTRA_COLORS.length]]))
   }, [L])
 
-  // 客訂異常（逾期未出貨／即將到期還沒備貨／未填出貨日）：規則跟「客訂管理 → 異常狀態（生產部）」同一套
+  // 客訂異常（逾期未出貨／即將到期還沒備貨／已排生產、出貨日還沒定）：規則跟「客訂管理 → 異常狀態（生產部）」同一套
   const anomaly = useMemo(() => orderAnomalies(orders, today), [orders, today])
 
   // 客訂出貨清單（整合在生產排程表上方）：今天以後、還沒出貨的客訂，依出貨日排序
@@ -367,6 +367,15 @@ export default function SchedulePage() {
         return { o, td, name, f, cv: convOf(o, f), warn: soonIds.has(o.id), row: used[o.id] || null, packed: o.status === 'prepared' }
       })
   }, [orders, anomaly, schData, today, L, convOf, itemSpecs])
+  // 順便包可以選的客訂：上面的待出貨客訂＋出貨日還沒定的（排好生產後客服才定出貨日）
+  const alsoList = useMemo(() => [
+    ...orderList,
+    ...orders.filter(o => !shipDateOf(o) && !isOemOrder(o, itemSpecs) && o.status !== 'prepared').map(o => {
+      const name = o.item_name || o.itemName || ''
+      const f = L.all.find(x => name.includes(x)) || ''
+      return { o, td: '', name, f, cv: convOf(o, f), warn: false, row: null, packed: false }
+    }),
+  ], [orderList, orders, itemSpecs, L, convOf])
   const ordPending = orderList.filter(x => !x.row && !x.packed).length
   const ordPacked = orderList.filter(x => x.packed).length
   const removeRow = id => { setSchData(d => d.filter(r => r.id !== id)); showToast('已刪除這列扣除，記得存檔') }
@@ -402,7 +411,7 @@ export default function SchedulePage() {
     setAlsoDraft({ ...EMPTY_ALSO, unit: d.unit })
   }
   const addAlsoOrder = (r, oid) => {
-    const x = orderList.find(y => String(y.o.id) === oid); if (!x) return
+    const x = alsoList.find(y => String(y.o.id) === oid); if (!x) return
     const cust = x.o.customer_name || x.o.customerName || ''
     setAlso(r.id, l => [...l, { id: uid(), item: x.f || x.name, qty: x.cv.bags, unit: '袋', g: x.cv.g, note: cust, orderId: x.o.id }])
   }
@@ -740,7 +749,7 @@ export default function SchedulePage() {
           （{[
             anomaly.late.length > 0 && `逾期未出貨 ${anomaly.late.length}`,
             anomaly.soon.length > 0 && `即將到期還沒備貨 ${anomaly.soon.length}`,
-            anomaly.noDate.length > 0 && `未填出貨日 ${anomaly.noDate.length}`,
+            anomaly.noDate.length > 0 && `已排生產、出貨日還沒定 ${anomaly.noDate.length}`,
           ].filter(Boolean).join('、')}），請到「客訂管理 → 異常狀態（生產部）」查看處理。
         </div>
       )}
@@ -943,7 +952,7 @@ export default function SchedulePage() {
                   const also = r.also || []
                   const showAlso = r.item && (also.length > 0 || alsoOpen === r.id)
                   // 可以從客訂加入的：還沒包好的客訂（已經在這列的不重複列出）
-                  const ordOpts = alsoOpen === r.id ? orderList.filter(x => !x.packed && !also.some(a => a.orderId === x.o.id)) : []
+                  const ordOpts = alsoOpen === r.id ? alsoList.filter(x => !x.packed && !also.some(a => a.orderId === x.o.id)) : []
                   return (
                     <Fragment key={r.id}>
                     <tr {...rowProps} className={`${r.item ? '' : 'ps-blank'}${dragCls}${showAlso ? '' : endCls}`}>
@@ -1005,7 +1014,7 @@ export default function SchedulePage() {
                                   const where = (alsoWhere[x.o.id] || []).filter(Boolean)
                                   return (
                                     <option key={x.o.id} value={String(x.o.id)}>
-                                      {`${mdOf(x.td)} 出貨 ${x.o.customer_name || x.o.customerName || ''} ${x.f || x.name} ${x.cv.bags}袋×${x.cv.g}g${where.length ? `（已排 ${where.map(mdOf).join('、')} 包）` : ''}`}
+                                      {`${x.td ? `${mdOf(x.td)} 出貨` : `出貨日未定${x.o.cs?.due ? `（交期 ${mdOf(x.o.cs.due)}）` : ''}`} ${x.o.customer_name || x.o.customerName || ''} ${x.f || x.name} ${x.cv.bags}袋×${x.cv.g}g${where.length ? `（已排 ${where.map(mdOf).join('、')} 包）` : ''}`}
                                     </option>
                                   )
                                 })}
