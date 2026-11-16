@@ -264,6 +264,7 @@ export default function OrdersPage({ user }) {
   const [specOem, setSpecOem] = useState(false) // 存成固定規格：清單沒有的新品項是不是代工品
   const [itemSpecs, setItemSpecs] = useState({}) // 品名 → { g 每袋重量, big 大箱袋數, mid 中箱袋數, box 預設箱型, pack 固定包材, oem 代工品 }
   const [places, setPlaces] = useState([]) // 併櫃／送貨地點 [{ name, detail }]
+  const [custTerms, setCustTerms] = useState({}) // 客戶 → 平常的結帳方式：'prepay' 先付款（付款後才排生產）／'fixed' 固定結帳（不用付款日）；每張單自己選，這裡只當預設
   const [placeOpen, setPlaceOpen] = useState(false) // 地點清單管理展開
   const [placeDraft, setPlaceDraft] = useState({ name: '', detail: '' })
   const [shipSt, setShipSt] = useState(EMPTY_SHIP) // 出貨安排（確認訂單、定出貨日共用）
@@ -301,7 +302,7 @@ export default function OrdersPage({ user }) {
     pack: EMPTY_PACK,
     merge: EMPTY_MERGE, // 存檔時放進 cs.merge（資料庫沒有 merge 欄位）
     payDate: '', leadDays: LEAD_DAYS, // 付款日、交期天數：存檔時放進 cs
-    prodFrom: '', prodTo: '', qtyApprox: false, prodHint: '', // 客戶指定生產區間、數量是大概的、大概什麼時候做：存檔時放進 cs
+    prodFrom: '', prodTo: '', qtyApprox: false, prodHint: '', terms: '', termsSave: false, // 客戶指定生產區間、數量是大概的、大概什麼時候做、結帳方式：存檔時放進 cs
   }
   const [formData, setFormData] = useState(emptyForm)
 
@@ -332,16 +333,26 @@ export default function OrdersPage({ user }) {
   // 品項清單（規格、代工品）與併櫃地點
   useEffect(() => {
     loadPage('orders').then(({ data }) => {
-      if (data?.data) { setItemSpecs(data.data.itemSpecs || {}); setPlaces(data.data.places || []) }
+      if (data?.data) { setItemSpecs(data.data.itemSpecs || {}); setPlaces(data.data.places || []); setCustTerms(data.data.custTerms || {}) }
     })
   }, [])
   const saveOrderConfig = async patch => {
-    const next = { itemSpecs, places, ...patch }
+    const next = { itemSpecs, places, custTerms, ...patch }
     if (patch.itemSpecs) setItemSpecs(patch.itemSpecs)
     if (patch.places) setPlaces(patch.places)
+    if (patch.custTerms) setCustTerms(patch.custTerms)
     const { error } = await savePageData('orders', next)
     if (error) showToast('⚠ 沒存到：' + error.message)
     return !error
+  }
+  // 結帳方式：每張單自己選（cs.terms）；沒選就帶這位客戶平常的（custTerms，客戶名稱要一樣才對得到）
+  const termsOf = name => custTerms[String(name || '').trim()] || ''
+  const termsOfOrder = o => o?.cs?.terms || termsOf(o?.customer_name || o?.customerName)
+  // 存單時記住：客戶第一次選的當預設；之後選不一樣的，有勾「以後都用這個」才改預設
+  const rememberTerms = (name, t, always) => {
+    const n = String(name || '').trim()
+    if (!n || !t || custTerms[n] === t || (custTerms[n] && !always)) return
+    saveOrderConfig({ custTerms: { ...custTerms, [n]: t } })
   }
 
   // 尺寸選單：還沒存過清單時＝預設＋訂單用過的尺寸；存過之後就照清單（刪掉的不會再跑回來）
@@ -607,7 +618,7 @@ export default function OrdersPage({ user }) {
     const existingOrder = orders.find(o => o.id === editingOrderId)
     try {
       const now = new Date().toISOString()
-      const { merge, payDate, leadDays, prodFrom, prodTo, qtyApprox, prodHint, ...data } = pendingOrderData // 併櫃、付款日、生產區間、約略數量、大概時間不是資料庫欄位，放進 cs
+      const { merge, payDate, leadDays, prodFrom, prodTo, qtyApprox, prodHint, terms, termsSave, ...data } = pendingOrderData // 併櫃、付款日、生產區間、約略數量、大概時間、結帳方式不是資料庫欄位，放進 cs
       const row = {
         id, ...data,
         status: existingOrder?.status || 'preorder', // 新接的單先放「預排客訂」，客服確認後才到等待排程
@@ -623,6 +634,8 @@ export default function OrdersPage({ user }) {
       if (prodFrom && prodTo) { row.cs.prodFrom = prodFrom; row.cs.prodTo = prodTo } else { delete row.cs.prodFrom; delete row.cs.prodTo }
       if (qtyApprox) row.cs.qtyApprox = true; else delete row.cs.qtyApprox
       if (String(prodHint || '').trim()) row.cs.prodHint = String(prodHint).trim(); else delete row.cs.prodHint
+      const termsEff = terms || termsOf(data.customer_name) // 這張單的結帳方式（沒選就是客戶平常的）
+      if (termsEff) row.cs.terms = termsEff; else delete row.cs.terms
       let { error } = await supabase.from('adv_orders').upsert(row)
       const missing = []
       while (error && COL_SQL[missingCol(error)] && !missing.includes(missingCol(error))) { // 資料庫還沒有 pack／cs 欄位
@@ -632,6 +645,7 @@ export default function OrdersPage({ user }) {
       }
       if (error) throw error
       if (missing.length) alert('訂單已存，但' + colMsg(missing))
+      rememberTerms(data.customer_name, termsEff, termsSave)
       showToast(editingOrderId ? '訂單修改成功 ✅' : '訂單已放進「預排客訂」✅')
       fetchOrders()
       if (formData.is_mixed_box && submitActionRef.current === 'continue' && !editingOrderId) {
@@ -670,7 +684,7 @@ export default function OrdersPage({ user }) {
       ...emptyForm, ...order, pack: { ...EMPTY_PACK, ...(order.pack || {}) }, merge: mergeOf(order),
       items_per_box: order.items_per_box || order.box_qty_each || '',
       payDate: order.cs?.payDate || '', leadDays: order.cs?.leadDays || LEAD_DAYS,
-      prodFrom: toIso(order.cs?.prodFrom || ''), prodTo: toIso(order.cs?.prodTo || ''), qtyApprox: !!order.cs?.qtyApprox, prodHint: order.cs?.prodHint || '',
+      prodFrom: toIso(order.cs?.prodFrom || ''), prodTo: toIso(order.cs?.prodTo || ''), qtyApprox: !!order.cs?.qtyApprox, prodHint: order.cs?.prodHint || '', terms: order.cs?.terms || '', termsSave: false,
     })
     if ((order.box_count||0) > 0) { setUseBoxCalc(true); setBoxCountInput(String(order.box_count)) }
     setEditingOrderId(order.id); setIsFormOpen(true)
@@ -806,7 +820,7 @@ export default function OrdersPage({ user }) {
   const shipStOf = o => {
     let m = mergeOf(o)
     if (!m.on && shipDateOf(o)) { const sib = orders.find(x => x.id !== o.id && x.status !== LOST && batchKey(x) === batchKey(o) && x.cs?.merge?.on); if (sib) m = mergeOf(sib) }
-    return { payDate: o.cs?.payDate || '', leadDays: o.cs?.leadDays || LEAD_DAYS, ship: shipDateOf(o) || mergeShipDate(m), merge: m }
+    return { payDate: o.cs?.payDate || '', leadDays: o.cs?.leadDays || LEAD_DAYS, ship: shipDateOf(o) || mergeShipDate(m), merge: m, terms: o.cs?.terms || '', termsSave: false }
   }
   // 改併櫃日（或打開併櫃）就自動算出貨日（還是可以再改）
   const patchShip = (st, patch) => {
@@ -833,7 +847,8 @@ export default function OrdersPage({ user }) {
     // 一起定的：出貨日、併櫃一樣；付款日各自的不動
     const ups = list.map(x => {
       const own = x.id === o.id ? st : { ...st, payDate: x.cs?.payDate || '', leadDays: x.cs?.leadDays || LEAD_DAYS }
-      return { id: x.id, data: { target_date: st.ship, cs: { ...applyShip(x.cs, own), shipSetAt: now, shipSetBy: me }, updated_at: now } }
+      const tEff = x.id === o.id ? (st.terms || termsOfOrder(o)) : '' // 結帳方式只改這一張（一起定的各自不動）
+      return { id: x.id, data: { target_date: st.ship, cs: { ...applyShip(x.cs, own), ...(tEff ? { terms: tEff } : {}), shipSetAt: now, shipSetBy: me }, updated_at: now } }
     })
     setOrders(l => l.map(x => { const u = ups.find(y => y.id === x.id); return u ? { ...x, ...u.data } : x }))
     setShipFor(null)
@@ -841,6 +856,7 @@ export default function OrdersPage({ user }) {
       const { error } = await updateOrder(u.id, u.data, '出貨日已存，但')
       if (error) { alert('出貨日沒存到：' + error.message); fetchOrders(); return }
     }
+    rememberTerms(o.customer_name || o.customerName, st.terms || termsOfOrder(o), st.termsSave)
     // 定好之後，問要不要加出貨的 Google 日曆
     setCalFor({ key: batchKey({ ...o, target_date: st.ship }), confirmed: false, done: `✅ 出貨日已定：${mdw(st.ship)}${list.length > 1 ? `（${list.length} 筆一起定）` : ''}` })
     fetchOrders()
@@ -1023,12 +1039,37 @@ export default function OrdersPage({ user }) {
   }
 
   // 💰 付款日 → 交期（付款日＋N 個工作天；新增客訂表單、確認訂單、定出貨日共用）
-  const renderPay = (st, set) => {
+  // 付款日（交期）看這張單的結帳方式：固定結帳（例如里仁）不用付款日；先付款（外銷、其他代工）收到款再填。
+  // 兩個選項每張單都看得到、都能選；沒選就帶這位客戶平常的（custTerms）
+  const renderPay = (st, set, cust) => {
     const due = dueOf(st)
+    const name = String(cust || '').trim(), def = termsOf(name)
+    const terms = st.terms || def, fixed = terms === 'fixed'
+    const hint = !terms ? '選一下，下次這位客戶自動帶入' : !st.terms ? `帶入 ${name} 平常的` : ''
+    const seg = (
+      <div className="op-terms" role="group" aria-label="結帳方式" style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center', marginBottom: 8 }}>
+        <span style={{ fontSize: 13, fontWeight: 800, color: '#334155' }}>💳 結帳方式</span>
+        {[['prepay', '先付款'], ['fixed', '固定結帳']].map(([v, l]) => (
+          <button key={v} type="button" aria-pressed={terms === v} onClick={() => set(v === 'fixed' ? { terms: v, payDate: '' } : { terms: v })}
+            style={{ padding: '4px 12px', borderRadius: 999, border: `1px solid ${terms === v ? '#0e7490' : '#cbd5e1'}`, background: terms === v ? '#0e7490' : '#fff', color: terms === v ? '#fff' : '#334155', fontWeight: 800, fontSize: 13, cursor: 'pointer', fontFamily: 'inherit' }}>{l}</button>
+        ))}
+        {hint && <span style={{ fontSize: 12, color: '#94a3b8' }}>{hint}</span>}
+        {name && def && st.terms && st.terms !== def && ( // 這張單跟平常不一樣：要不要改成以後都這樣
+          <label style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 12, color: '#475569', cursor: 'pointer' }}>
+            <input type="checkbox" checked={!!st.termsSave} onChange={e => set({ termsSave: e.target.checked })} aria-label="以後這位客戶都用這個結帳方式" style={{ width: 14, height: 14 }} />
+            以後 {name} 都用「{st.terms === 'fixed' ? '固定結帳' : '先付款'}」
+          </label>
+        )}
+      </div>
+    )
     return (
-      <div className="op-pay" style={{ background: '#fffbeb', border: '1px solid #fde68a', borderRadius: 16, padding: 12, marginBottom: 12 }}>
+      <div className={`op-pay${fixed ? ' op-pay-fixed' : ''}`} style={{ background: fixed ? '#f8fafc' : '#fffbeb', border: `1px solid ${fixed ? '#e2e8f0' : '#fde68a'}`, borderRadius: 16, padding: 12, marginBottom: 12 }}>
+        {seg}
+        {fixed && !st.payDate ? (
+          <div className="op-pay-fixed-note" style={{ fontSize: 13, fontWeight: 700, color: '#475569' }}>固定結帳：不用填付款日。</div>
+        ) : <>
         <div style={{ fontSize: 13, fontWeight: 800, color: '#92400e', marginBottom: 6 }}>
-          💰 付款日 <span style={{ fontWeight: 500, color: '#a16207', fontSize: 12 }}>（選填：要先付款才排生產的單，填了自動算交期）</span>
+          💰 付款日 <span style={{ fontWeight: 500, color: '#a16207', fontSize: 12 }}>（{terms === 'prepay' ? '要先付款：收到款再填，填了自動算交期' : fixed ? '固定結帳一般不用填' : '選填：要先付款才排生產的單，填了自動算交期'}）</span>
         </div>
         <div style={{ display: 'flex', gap: 6 }}>
           <input type="date" value={st.payDate || ''} onChange={e => set({ payDate: e.target.value })} aria-label="付款日"
@@ -1046,6 +1087,7 @@ export default function OrdersPage({ user }) {
           </div>
         )}
         {due && st.ship && st.ship > due && <div style={{ marginTop: 4, fontSize: 13, fontWeight: 800, color: '#dc2626' }}>⚠ 出貨日 {mdw(st.ship)} 比交期晚</div>}
+        </>}
       </div>
     )
   }
@@ -1090,6 +1132,7 @@ export default function OrdersPage({ user }) {
       <div className="op-due-info" style={{ fontSize: 13, background: '#fffbeb', border: '1px solid #fde68a', borderRadius: 12, padding: '8px 12px', marginBottom: 12, lineHeight: 1.7, color: '#92400e' }}>
         <div>出貨日：<b>{td ? mdw(td) : '還沒定（排好生產後客服再定）'}</b></div>
         {due && <div>⏰ 交期：<b>{mdw(due)}</b>（{mdOf(o.cs.payDate)} 付款後 {o.cs.leadDays || LEAD_DAYS} 個工作天）</div>}
+        {!o.cs?.payDate && termsOfOrder(o) === 'prepay' && <div style={{ color: '#dc2626', fontWeight: 800 }}>⚠ 這張單要先付款，付款日還沒填（收到款再排生產）</div>}
         {prod && limit && prod > limit && <div style={{ color: '#dc2626', fontWeight: 800 }}>⚠ 生產日比{limit === td ? '出貨日' : '交期'}晚</div>}
         {w && <div>🗓 客戶指定生產區間：<b>{winTxt(w)}</b>（請排在這幾天內）</div>}
         {!w && prodHintOf(o) && <div>🗓 客戶說大概：<b>{prodHintOf(o)}</b>（還沒給確切區間）</div>}
@@ -1543,6 +1586,12 @@ export default function OrdersPage({ user }) {
                             </span>
                           )
                         })()}
+                        {!o.cs?.payDate && o.status === 'pending' && termsOfOrder(o) === 'prepay' && ( // 先付款的單還沒收到款：先別排生產
+                          <span className="op-waitpay-chip" title="這張單是先付款：收到款、填了付款日再排生產（✏️ 或 🚚 定出貨日裡填付款日）"
+                            style={{ fontSize: 12, background: '#fef2f2', color: '#b91c1c', border: '1px solid #fecaca', padding: '1px 8px', borderRadius: 6, fontWeight: 800 }}>
+                            💰 等付款（收到款再排生產）
+                          </span>
+                        )}
                         {o.notes && <span style={{ fontSize: 12, background: '#f8fafc', color: '#475569', padding: '2px 8px', borderRadius: 6 }}>📝 {o.notes}</span>}
                       </div>
                       {showChecklist && (
@@ -1706,7 +1755,7 @@ export default function OrdersPage({ user }) {
             )}
             {statusModal.order.status === 'preorder' && <>
               {renderConfWin(statusModal.order)}
-              {renderPay(shipSt, setShipP)}
+              {renderPay(shipSt, setShipP, statusModal.order.customer_name || statusModal.order.customerName)}
               {renderMerge(shipSt.merge, p => setShipP({ merge: p }), shipSt.ship, false)}
               {renderShipDate(shipSt, setShipP, false)}
               {statusErr && <div style={{ color: '#dc2626', fontSize: 13, fontWeight: 700, margin: '-4px 0 12px' }}>{statusErr}</div>}
@@ -1735,9 +1784,12 @@ export default function OrdersPage({ user }) {
                   updateData.target_date = shipSt.ship || ''
                   updateData.cs = applyShip({ ...(o.cs || {}), receivedAt: o.cs?.receivedAt || o.created_at, owner: o.cs?.owner || me, confirmedAt: now, confirmedBy: me, next: '' }, shipSt)
                   if (confWin.from) { updateData.cs.prodFrom = confWin.from; updateData.cs.prodTo = confWin.to } else { delete updateData.cs.prodFrom; delete updateData.cs.prodTo }
+                  const tEff = shipSt.terms || termsOf(o.customer_name || o.customerName)
+                  if (tEff) updateData.cs.terms = tEff; else delete updateData.cs.terms
                 }
                 const { error } = await updateOrder(o.id, updateData, '狀態已更新，但')
                 if (error) { alert('狀態更新失敗：' + error.message); return }
+                if (o.status === 'preorder') rememberTerms(o.customer_name || o.customerName, updateData.cs?.terms, shipSt.termsSave)
                 if (o.status === 'preorder') { // 轉到等待排程；出貨日定了才問要不要加出貨的 Google 日曆
                   const up = { ...o, ...updateData }
                   setOrders(l => l.map(x => (x.id === o.id ? up : x)))
@@ -1771,7 +1823,7 @@ export default function OrdersPage({ user }) {
               <div style={{ fontSize: 14, background: '#f0fdf4', color: '#065f46', borderRadius: 12, padding: '8px 12px', marginBottom: 12, lineHeight: 1.6 }}>
                 目前在「{STATUS_LABEL[o.status]}」・排程生產日 <b>{sd ? mdw(sd) : '還沒排'}</b>
               </div>
-              {renderPay(shipSt, setShipP)}
+              {renderPay(shipSt, setShipP, nm)}
               {renderMerge(shipSt.merge, p => setShipP({ merge: p }), shipSt.ship, false)}
               {renderShipDate(shipSt, setShipP, true)}
               {others.length > 0 && (
@@ -1910,6 +1962,7 @@ export default function OrdersPage({ user }) {
               {pendingOrderData.pack?.oem && <div style={{ background: '#fef3c7', borderRadius: 8, padding: '6px 10px', fontSize: 13, fontWeight: 800, color: '#92400e' }}>🏭 代工品（不進生產排程、庫存）</div>}
               {pendingOrderData.merge?.on && <div style={{ background: '#f0f9ff', borderRadius: 8, padding: '6px 10px', fontSize: 13, fontWeight: 700, color: '#0369a1' }}>🚢 {mergeTxt(pendingOrderData.merge)}</div>}
               {pendingOrderData.payDate && <div style={{ background: '#fffbeb', borderRadius: 8, padding: '6px 10px', fontSize: 13, fontWeight: 700, color: '#92400e' }}>💰 {mdOf(pendingOrderData.payDate)} 付款・⏰ 交期 {mdw(dueOf(pendingOrderData))}</div>}
+              {(pendingOrderData.terms || termsOf(pendingOrderData.customer_name)) && <div className="op-confirm-terms" style={{ background: '#f8fafc', borderRadius: 8, padding: '6px 10px', fontSize: 13, fontWeight: 700, color: '#475569' }}>💳 {(pendingOrderData.terms || termsOf(pendingOrderData.customer_name)) === 'fixed' ? '固定結帳' : '先付款'}</div>}
             </div>
             <button onClick={executeSave} style={{ width: '100%', padding: '12px', background: '#059669', color: '#fff', border: 'none', borderRadius: 16, fontWeight: 900, fontSize: 15, cursor: 'pointer', marginBottom: 8 }}>確認無誤，正式存檔</button>
             <button onClick={() => setIsConfirmOpen(false)} style={{ width: '100%', padding: '10px', background: '#f1f5f9', color: '#64748b', border: 'none', borderRadius: 16, fontWeight: 700, cursor: 'pointer' }}>返回修改</button>
@@ -2217,7 +2270,7 @@ export default function OrdersPage({ user }) {
                 <input type="date" name="target_date" value={formData.target_date} onChange={handleInputChange} aria-label={formIsPre ? '預計出貨日' : '出貨日'} style={{ width: '100%', background: '#fef2f2', border: 'none', borderRadius: 12, padding: '10px', fontFamily: 'inherit' }} />
               </div>
             </div>
-            {renderPay({ payDate: formData.payDate, leadDays: formData.leadDays, ship: formData.target_date }, patch => setFormData(p => ({ ...p, ...patch })))}
+            {renderPay({ payDate: formData.payDate, leadDays: formData.leadDays, ship: formData.target_date, terms: formData.terms, termsSave: formData.termsSave }, patch => setFormData(p => ({ ...p, ...patch })), formData.customer_name)}
             {renderMerge({ ...EMPTY_MERGE, ...(formData.merge || {}) }, setMerge, formData.target_date, true)}
 
             <div style={{ display: 'flex', gap: 8 }}>
