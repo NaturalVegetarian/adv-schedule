@@ -3,7 +3,7 @@ import { supabase } from '../lib/supabase'
 import { fmtDT, loadPage, loadLogs, savePageData, addLog, AdjustLog } from '../lib/pageSave'
 import { DEFAULT_PPB, DEFAULT_MAX_CAP, isoOf, parseIso, addDays, wdOf, mdOf, todayIso, toIso, WD } from '../lib/flavors'
 import { flavorGroups } from './SalesPage' // 品項與分類跟著銷售計畫
-import { orderAnomalies, shipDateOf, isOemOrder } from './OrdersPage'
+import { orderAnomalies, shipDateOf, isOemOrder, prodWinOf, isApprox } from './OrdersPage'
 
 // ③ 生產排程（生產排程科）＝ Excel「3.生產排程表」＋「庫存量預估表」
 // 每日庫存 ＝ 前一天庫存 − 每日預估銷售量（含節日加乘）− 當天已確定銷售量 ＋ 當天入庫量
@@ -51,6 +51,7 @@ const barStyle = (ratio, color) => {
 }
 // 客訂管理的關卡名稱（顯示用）
 const ORDER_STAGE = { pending: '等待排程', packaging: '包材準備', scheduled: '完成備貨', prepared: '確認出貨' }
+const OEM_STAGE = { preorder: '預排（客戶還沒確認）', ...ORDER_STAGE }
 
 let _uid = 0
 const uid = () => `r${Date.now().toString(36)}${(_uid++).toString(36)}`
@@ -102,19 +103,19 @@ function diffSch(prev, cur) {
   const changed = (o, r) => isOut(r)
     ? o.date !== r.date || o.item !== r.item || Number(o.qty) !== Number(r.qty) || (o.note || '') !== (r.note || '')
     : o.date !== r.date || o.item !== r.item || Number(o.barrels) !== Number(r.barrels) || (o.inDate || '') !== (r.inDate || '')
-  // 順便包（生產那天順便要包的其他品項）
+  // 非常規包裝（排在生產列下面，生產那天要做的特殊包裝）
   const alsoDiff = (o, r) => {
     const at = `${day(r.date)} ${r.item}`
     const om = Object.fromEntries((o?.also || []).map(a => [a.id, a]))
     const rm = Object.fromEntries((r.also || []).map(a => [a.id, a]))
     ;(r.also || []).forEach(a => {
       const p = om[a.id]
-      if (!p) out.push(`新增順便包 ${at}：${alsoTxt(a)}`)
-      else if (alsoTxt(p) !== alsoTxt(a)) out.push(`修改順便包 ${at}：${alsoTxt(p)} → ${alsoTxt(a)}`)
+      if (!p) out.push(`新增非常規包裝 ${at}：${alsoTxt(a)}`)
+      else if (alsoTxt(p) !== alsoTxt(a)) out.push(`修改非常規包裝 ${at}：${alsoTxt(p)} → ${alsoTxt(a)}`)
     })
-    ;(o?.also || []).forEach(p => { if (!rm[p.id]) out.push(`刪除順便包 ${at}：${alsoTxt(p)}`) })
+    ;(o?.also || []).forEach(p => { if (!rm[p.id]) out.push(`刪除非常規包裝 ${at}：${alsoTxt(p)}`) })
   }
-  const withAlso = r => (r.also?.length ? `（含順便包：${r.also.map(alsoTxt).join('、')}）` : '')
+  const withAlso = r => (r.also?.length ? `（含非常規包裝：${r.also.map(alsoTxt).join('、')}）` : '')
   const pm = Object.fromEntries(prev.map(r => [r.id, r]))
   const cm = Object.fromEntries(cur.map(r => [r.id, r]))
   cur.forEach(r => {
@@ -154,11 +155,11 @@ function diffConv(p, c) {
 }
 const fmtN = n => Number(n || 0).toLocaleString('zh-TW', { maximumFractionDigits: 2 })
 const cleanNum = v => String(v).replace(/[^\d.]/g, '').replace(/(\..*)\./g, '$1') // 只留數字和一個小數點（打 -200 會變 200）
-// 順便包：生產那天順便要包的其他品項（只記在排程和 Google 日曆上，不會扣庫存）
+// 非常規包裝：生產那天要做的特殊包裝（客訂或自己填）。會扣庫存（扣在那一列生產入庫的日期），也會寫進 Google 日曆
 const ALSO_UNITS = ['袋', '包', '箱']
 const alsoShort = a => `${a.item} ${fmtN(a.qty)}${a.unit || '袋'}`
 const alsoTxt = a => `${alsoShort(a)}${a.g ? `×${a.g}g` : ''}${a.note ? `（${a.note}）` : ''}`
-const EMPTY_ALSO = { item: '', qty: '', unit: '袋', note: '' }
+const EMPTY_ALSO = { item: '', qty: '', unit: '袋', g: '', note: '' }
 
 export default function SchedulePage() {
   const [schData, setSchData] = useState([])
@@ -184,9 +185,13 @@ export default function SchedulePage() {
   const [logs, setLogs] = useState([])
   const [linked, setLinked] = useState({ sales: null, inventory: null })
   const [showOrd, setShowOrd] = useState(true) // 客訂出貨清單展開／收合
+  const [showOem, setShowOem] = useState(true) // 🏭 代工清單展開／收合
+  const [preOrders, setPreOrders] = useState([]) // 預排客訂（只給「🏭 代工」清單用）
   const [flash, setFlash] = useState(null) // 剛加入的扣除列，閃一下
   const [undo, setUndo] = useState(null) // 剛刪掉的列（可以復原）
-  const [alsoOpen, setAlsoOpen] = useState(null) // 正在加「順便包」的排程列 id
+  const [alsoOpen, setAlsoOpen] = useState(null) // 正在加「非常規包裝」的排程列 id
+  const [mergeNote, setMergeNote] = useState('') // 讀取時把重複的扣除併進非常規包裝的說明
+  const mergedOnce = useRef(false)
   const [alsoDraft, setAlsoDraft] = useState(EMPTY_ALSO)
   const undoTimer = useRef(null)
   useEffect(() => () => clearTimeout(undoTimer.current), [])
@@ -194,7 +199,8 @@ export default function SchedulePage() {
   const [savedConv, setSavedConv] = useState(() => withRuleIds(DEFAULT_CONV))
   const [showConv, setShowConv] = useState(false)
 
-  const showToast = msg => { setToast(msg); setTimeout(() => setToast(null), 3000) }
+  const toastTimer = useRef(null) // 新的提示出來時，重新算 3 秒（舊的計時不會把新提示提早關掉）
+  const showToast = msg => { setToast(msg); clearTimeout(toastTimer.current); toastTimer.current = setTimeout(() => setToast(null), 3000) }
   const today = todayIso()
 
   // 讀取：排程、產量設定、調整紀錄、銷售計畫、庫存狀況
@@ -231,8 +237,8 @@ export default function SchedulePage() {
   useEffect(() => { loadPage('orders').then(({ data }) => setItemSpecs(data?.data?.itemSpecs || {})) }, [])
   useEffect(() => {
     const fetchOrders = async () => {
-      const { data } = await supabase.from('adv_orders').select('*').in('status', ['pending','packaging','scheduled','prepared'])
-      if (data) setOrders(data)
+      const { data } = await supabase.from('adv_orders').select('*').in('status', ['preorder','pending','packaging','scheduled','prepared'])
+      if (data) { setOrders(data.filter(o => o.status !== 'preorder')); setPreOrders(data.filter(o => o.status === 'preorder')) }
     }
     fetchOrders()
     const ch = supabase.channel('sch_orders').on('postgres_changes', { event: '*', schema: 'public', table: 'adv_orders' }, () => fetchOrders()).subscribe()
@@ -290,6 +296,47 @@ export default function SchedulePage() {
     return m
   }, [linked])
 
+  // 客訂袋數 → 庫存包數
+  const convOf = useMemo(() => {
+    const base = Number(conv.baseG) || 800
+    const rules = conv.rules.filter(validRule)
+    return (o, f) => {
+      const bags = Number(o.quantity) || 0
+      const g = Number(o.weight_per_bag) || 5250 // 跟客訂管理一樣：沒填就是 5250g
+      const hit = rules.find(r => r.f && r.f === f && Number(r.g) === g) || rules.find(r => !r.f && Number(r.g) === g)
+      const per = hit ? Number(hit.p) : g / base
+      return { bags, g, per, packs: Math.round(bags * per * 100) / 100, how: hit ? `固定換算：每袋 ${g}g＝${fmtN(per)} 包` : `自動換算：${g}g ÷ ${base}g＝${fmtN(per)} 包` }
+    }
+  }, [conv])
+
+  // ── 非常規包裝：每一項要扣的口味和包數（扣在那一列生產入庫的日期）──
+  // 客訂＝袋數×每袋重量換算；自己填的：「包」直接扣、「袋」要填每袋重量；「箱」或認不出口味的不扣
+  const ncOf = a => {
+    const name = String(a.item || '')
+    const f = L.all.includes(name) ? name : (L.all.find(x => name.includes(x)) || '')
+    if (!f) return { why: '認不出是哪個口味，不扣庫存' }
+    const unit = a.unit || '袋'
+    if (unit === '包') return { f, packs: Number(a.qty) || 0, how: `${fmtN(a.qty)} 包` }
+    if (unit === '袋' && Number(a.g) > 0) { const cv = convOf({ quantity: a.qty, weight_per_bag: a.g }, f); return { f, packs: cv.packs, how: cv.how } }
+    return { why: unit === '袋' ? '沒填每袋重量，不知道是幾包，不扣庫存' : `單位是「${unit}」，不知道是幾包，不扣庫存` }
+  }
+  const ncList = useMemo(() => {
+    const out = [], seen = {}
+    // 同一筆客訂排在好幾天：只扣最早那天
+    schData.filter(r => !isOut(r) && r.item && r.date)
+      .sort((a, b) => autoIn(a).localeCompare(autoIn(b)))
+      .forEach(r => (r.also || []).forEach(a => {
+        const d = ncOf(a), dup = a.orderId ? seen[a.orderId] || null : null
+        const n = { rowId: r.id, itemId: a.id, date: autoIn(r), orderId: a.orderId || null, f: d.f || '', packs: d.packs || 0, how: d.how || '', why: d.why || '', dup, ok: !!d.f && d.packs > 0 && !dup }
+        if (n.ok && a.orderId) seen[a.orderId] = n
+        out.push(n)
+      }))
+    return out
+  }, [schData, L, convOf]) // eslint-disable-line react-hooks/exhaustive-deps
+  const ncByItem = useMemo(() => Object.fromEntries(ncList.map(n => [n.itemId, n])), [ncList])
+  const ncByOrder = useMemo(() => Object.fromEntries(ncList.filter(n => n.ok && n.orderId).map(n => [n.orderId, n])), [ncList])
+  const ncTot = ncList.reduce((t, n) => t + (n.ok ? n.packs : 0), 0)
+
   // ── 庫存量預估 ──
   const plan = useMemo(() => {
     const im = {}, om = {}, prodDays = {}
@@ -306,6 +353,10 @@ export default function SchedulePage() {
       im[ind][r.item] = (im[ind][r.item] || 0) + p
       ;(prodDays[r.date] = prodDays[r.date] || []).push(`${r.item} ${r.barrels}桶`)
     })
+    ncList.forEach(n => { // 非常規包裝：扣在生產入庫那天
+      if (!n.ok) return
+      om[n.date] = om[n.date] || {}; om[n.date][n.f] = (om[n.date][n.f] || 0) + n.packs
+    })
     const res = {}
     L.all.forEach(f => {
       const b = eff[f]
@@ -320,7 +371,7 @@ export default function SchedulePage() {
     })
     const mainTotal = DATES.map((_, i) => L.main.reduce((s, f) => s + res[f][i].raw, 0))
     return { res, prodDays, mainTotal }
-  }, [schData, ppb, L, eff, multOf, cf, DATES])
+  }, [schData, ncList, ppb, L, eff, multOf, cf, DATES])
 
   const hasSch = useMemo(() => {
     const first = DATES[0]?.iso, last = DATES[DATES.length - 1]?.iso
@@ -338,18 +389,6 @@ export default function SchedulePage() {
 
   // 客訂出貨清單（整合在生產排程表上方）：今天以後、還沒出貨的客訂，依出貨日排序
   // 已過出貨日、未填出貨日的屬於異常，到客訂管理的「異常狀態」處理
-  // 客訂袋數 → 庫存包數
-  const convOf = useMemo(() => {
-    const base = Number(conv.baseG) || 800
-    const rules = conv.rules.filter(validRule)
-    return (o, f) => {
-      const bags = Number(o.quantity) || 0
-      const g = Number(o.weight_per_bag) || 5250 // 跟客訂管理一樣：沒填就是 5250g
-      const hit = rules.find(r => r.f && r.f === f && Number(r.g) === g) || rules.find(r => !r.f && Number(r.g) === g)
-      const per = hit ? Number(hit.p) : g / base
-      return { bags, g, per, packs: Math.round(bags * per * 100) / 100, how: hit ? `固定換算：每袋 ${g}g＝${fmtN(per)} 包` : `自動換算：${g}g ÷ ${base}g＝${fmtN(per)} 包` }
-    }
-  }, [conv])
 
   const orderList = useMemo(() => {
     const soonIds = new Set(anomaly.soon.map(o => o.id))
@@ -364,19 +403,37 @@ export default function SchedulePage() {
         const name = o.item_name || o.itemName || ''
         const f = L.all.find(x => name.includes(x)) || ''
         // packed：已到「確認出貨」關卡＝包裝科已完成備貨，貨已經包好，不用再預扣庫存
-        return { o, td, name, f, cv: convOf(o, f), warn: soonIds.has(o.id), row: used[o.id] || null, packed: o.status === 'prepared' }
+        return { o, td, name, f, cv: convOf(o, f), warn: soonIds.has(o.id), row: used[o.id] || null, packed: o.status === 'prepared', nc: ncByOrder[o.id] || null }
       })
-  }, [orders, anomaly, schData, today, L, convOf, itemSpecs])
-  // 順便包可以選的客訂：上面的待出貨客訂＋出貨日還沒定的（排好生產後客服才定出貨日）
+  }, [orders, anomaly, schData, today, L, convOf, itemSpecs, ncByOrder])
+  // 🏭 代工：在「客訂管理」按「排入行程」排生產日（會帶入客戶指定的區間）。
+  // 這裡只列出來，排自己的產品時看得到代工哪幾天要做；已排的只列今天以後
+  const oemList = useMemo(() => [...preOrders, ...orders]
+    .filter(o => isOemOrder(o, itemSpecs))
+    .map(o => {
+      const sd = toIso(o.scheduled_date || o.scheduledDate), w = prodWinOf(o)
+      const flag = !sd && w ? (w.to < today ? 'late' : w.from <= addDays(today, 2) ? 'soon' : '') : ''
+      return { o, sd, w, flag, off: !!(sd && w && (sd < w.from || sd > w.to)), key: sd || w?.from || '9999' }
+    })
+    .filter(x => !x.sd || x.sd >= today)
+    .sort((a, b) => a.key.localeCompare(b.key)), [preOrders, orders, itemSpecs, today])
+  const oemTodo = oemList.filter(x => !x.sd).length
+  const oemDays = useMemo(() => { // 生產日 → 那天要做的代工（排程表的日期旁邊標 🏭）
+    const m = {}
+    oemList.forEach(x => { if (x.sd) (m[x.sd] = m[x.sd] || []).push(`${x.o.customer_name || ''} ${x.o.item_name || ''} ${isApprox(x.o) ? '約' : ''}${fmtN(x.o.quantity)}袋`) })
+    return m
+  }, [oemList])
+
+  // 非常規包裝可以選的客訂：上面的待出貨客訂＋出貨日還沒定的（排好生產後客服才定出貨日）
   const alsoList = useMemo(() => [
     ...orderList,
     ...orders.filter(o => !shipDateOf(o) && !isOemOrder(o, itemSpecs) && o.status !== 'prepared').map(o => {
       const name = o.item_name || o.itemName || ''
       const f = L.all.find(x => name.includes(x)) || ''
-      return { o, td: '', name, f, cv: convOf(o, f), warn: false, row: null, packed: false }
+      return { o, td: '', name, f, cv: convOf(o, f), warn: false, row: null, packed: false, nc: ncByOrder[o.id] || null }
     }),
-  ], [orderList, orders, itemSpecs, L, convOf])
-  const ordPending = orderList.filter(x => !x.row && !x.packed).length
+  ], [orderList, orders, itemSpecs, L, convOf, ncByOrder])
+  const ordPending = orderList.filter(x => !x.row && !x.packed && !x.nc).length
   const ordPacked = orderList.filter(x => x.packed).length
   const removeRow = id => { setSchData(d => d.filter(r => r.id !== id)); showToast('已刪除這列扣除，記得存檔') }
   const todayShip = orders.filter(o => toIso(o.target_date || o.targetDate) === today)
@@ -401,22 +458,43 @@ export default function SchedulePage() {
   // ── 排程輸入 ──
   const updateSch = (id, k, v) => setSchData(rows => rows.map(r => r.id === id ? { ...r, [k]: v } : r))
 
-  // ── 順便包：生產那天順便要包的其他品項（客訂或自己填），會一起寫進 Google 日曆 ──
+  // ── 非常規包裝：生產那天要做的特殊包裝（客訂或自己填）。會扣庫存，也會一起寫進 Google 日曆 ──
   const setAlso = (id, fn) => setSchData(rows => rows.map(r => (r.id === id ? { ...r, also: fn(r.also || []) } : r)))
   const openAlso = id => { setAlsoOpen(id); setAlsoDraft(EMPTY_ALSO) }
   const addAlsoDraft = r => {
     const d = alsoDraft
     if (!d.item.trim() || !(Number(d.qty) > 0)) { showToast('請填品項和數量'); return }
-    setAlso(r.id, l => [...l, { id: uid(), item: d.item.trim(), qty: Number(d.qty), unit: d.unit, note: d.note.trim() }])
+    setAlso(r.id, l => [...l, { id: uid(), item: d.item.trim(), qty: Number(d.qty), unit: d.unit, ...(d.unit === '袋' && Number(d.g) > 0 ? { g: Number(d.g) } : {}), note: d.note.trim() }])
     setAlsoDraft({ ...EMPTY_ALSO, unit: d.unit })
   }
   const addAlsoOrder = (r, oid) => {
     const x = alsoList.find(y => String(y.o.id) === oid); if (!x) return
     const cust = x.o.customer_name || x.o.customerName || ''
-    setAlso(r.id, l => [...l, { id: uid(), item: x.f || x.name, qty: x.cv.bags, unit: '袋', g: x.cv.g, note: cust, orderId: x.o.id }])
+    const a = { id: uid(), item: x.f || x.name, qty: x.cv.bags, unit: '袋', g: x.cv.g, note: cust, orderId: x.o.id }
+    // 這筆客訂改由非常規包裝扣：原本另外扣在出貨日的那列拿掉（只扣一次）
+    const d = ncOf(a)
+    const old = d.f && d.packs > 0 ? schData.filter(y => isOut(y) && y.orderId === x.o.id) : []
+    setSchData(rows => rows.filter(y => !old.includes(y)).map(y => (y.id === r.id ? { ...y, also: [...(y.also || []), a] } : y)))
+    if (old.length) showToast(`已加入非常規包裝；原本 ${mdOf(old[0].date)} 那列扣除已併進來（只扣一次），記得存檔`)
   }
-  const ordById = useMemo(() => Object.fromEntries(orderList.map(x => [x.o.id, x])), [orderList])
-  const alsoWhere = useMemo(() => { // 客訂 → 已經排在哪幾天順便包
+  const removeAlso = (r, a) => {
+    const n = ncByItem[a.id]
+    setAlso(r.id, l => l.filter(y => y.id !== a.id))
+    if (!n?.ok) return
+    // 同一筆客訂還排在別天 → 改由那天扣
+    const next = a.orderId ? ncList.find(x => x.orderId === a.orderId && x.itemId !== a.id && x.f && x.packs > 0) : null
+    showToast(next ? `已拿掉；這筆客訂改由 ${mdOf(next.date)} 的非常規包裝扣，記得存檔` : `已拿掉，不再扣 ${n.f} ${fmtN(n.packs)} 包，記得存檔`)
+  }
+  // 讀取後：客訂已排進非常規包裝、又另外扣在出貨日 → 併成只扣一次（存檔後生效）
+  useEffect(() => {
+    if (!loaded || mergedOnce.current) return
+    mergedOnce.current = true
+    const dupOut = schData.filter(r => isOut(r) && r.orderId && ncByOrder[r.orderId])
+    if (!dupOut.length) return
+    setSchData(d => d.filter(r => !dupOut.includes(r)))
+    setMergeNote(`有 ${dupOut.length} 筆客訂已排進「非常規包裝」，又另外扣在出貨日；已合併成只扣一次（扣在生產那天）。按 💾 存檔就會生效。`)
+  }, [loaded, schData, ncByOrder])
+  const alsoWhere = useMemo(() => { // 客訂 → 已經排在哪幾天的非常規包裝
     const m = {}
     schData.forEach(r => (r.also || []).forEach(a => { if (a.orderId) (m[a.orderId] = m[a.orderId] || []).push(r.date) }))
     return m
@@ -440,7 +518,7 @@ export default function SchedulePage() {
   const rowLabel = r => {
     const d = r.date ? `${mdOf(r.date)}（${wdOf(r.date).slice(1)}）` : '未定日期'
     if (!r.item) return `${d} 空白列`
-    return isOut(r) ? `${d} ${r.item} 扣除 −${fmtN(r.qty)} 包` : `${d} ${r.item} ${r.barrels} 桶${r.also?.length ? `（含順便包 ${r.also.length} 項）` : ''}`
+    return isOut(r) ? `${d} ${r.item} 扣除 −${fmtN(r.qty)} 包` : `${d} ${r.item} ${r.barrels} 桶${r.also?.length ? `（含非常規包裝 ${r.also.length} 項）` : ''}`
   }
   const delRow = r => {
     const index = schData.findIndex(x => x.id === r.id)
@@ -557,6 +635,7 @@ export default function SchedulePage() {
     setSchData(sorted); setSavedSch(sorted); setSavedPpb(ppb); setConv(cleanConv); setSavedConv(cleanConv); setLastSaved(now)
     setUndo(null); clearTimeout(undoTimer.current) // 存檔後就不能復原了
     if (ch.length) setLogs(l => [{ id: 'new-' + now, created_at: now, changes: ch }, ...l].slice(0, 50))
+    setMergeNote('')
     showToast('排程已儲存 ✅')
   }
 
@@ -602,10 +681,10 @@ export default function SchedulePage() {
     const fmt = x => isoOf(x).replace(/-/g, '')
     const pk = (Number(ppb[r.item]) || 0) * (Number(r.barrels) || 0)
     const also = r.also || []
-    // 標題：泡菜*4；有順便包 → 泡菜*4(有非常規包裝)
+    // 標題：泡菜*4；有非常規包裝 → 泡菜*4(有非常規包裝)
     const title = `${r.item}*${r.barrels}${also.length ? '(有非常規包裝)' : ''}`
     const details = `品項：${r.item}\n桶數：${r.barrels}\n包數：${pk}包\n入庫日：${mdOf(autoIn(r))}`
-      + (also.length ? `\n\n順便包：\n${also.map(a => `• ${alsoTxt(a)}`).join('\n')}` : '')
+      + (also.length ? `\n\n非常規包裝：\n${also.map(a => `• ${alsoTxt(a)}`).join('\n')}` : '')
       + `\n\n詳情依「生產排程整合系統」為主：${window.location.origin}`
     return `https://calendar.google.com/calendar/r/eventedit?text=${encodeURIComponent(title)}&dates=${fmt(s)}/${fmt(e)}&details=${encodeURIComponent(details)}`
   }
@@ -655,6 +734,9 @@ export default function SchedulePage() {
         .ps-also-chip em { font-style: normal; font-size: 11px; font-weight: 700; color: #b45309; background: #fef3c7; border-radius: 4px; padding: 0 5px; white-space: nowrap; }
         .ps-also-chip button { border: none; background: none; color: #94a3b8; cursor: pointer; font-size: 15px; line-height: 1; padding: 0 6px; border-radius: 999px; }
         .ps-also-chip button:hover { color: #b91c1c; background: #fee2e2; }
+        .ps-also-chip em.nc { color: #b91c1c; background: #fee2e2; }
+        .ps-also-chip em.no { color: #64748b; background: #f1f5f9; font-weight: 600; }
+        .ps-merge-note { margin: 0 0 10px; padding: 8px 12px; background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 8px; color: #1e3a8a; font-size: 13px; font-weight: 600; }
         .ps-also-more { font-size: 12px; font-weight: 700; color: #b45309; background: #fff; border: 1px dashed #fcd34d; border-radius: 999px; padding: 3px 10px; cursor: pointer; font-family: inherit; }
         .ps-also-form { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 6px; padding: 8px; background: #fff; border: 1px dashed #fcd34d; border-radius: 8px; font-size: 12px; color: #92400e; }
         .ps-also-form .inp { font-size: 13px; }
@@ -687,6 +769,21 @@ export default function SchedulePage() {
         .ps-conv { border-top: 1px dashed #fde68a; padding: 8px 10px 10px; font-size: 12px; color: #475569; background: #fffdf5; line-height: 1.6; }
         .ps-conv-row { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; margin-bottom: 4px; font-size: 13px; }
         .ps-ord-tip { font-size: 12px; color: #92400e; padding: 6px 10px 8px; line-height: 1.6; border-top: 1px solid #fde68a; }
+        .ps-oem { border: 1px solid #fde68a; background: #fffbeb; border-radius: 10px; margin-bottom: 10px; overflow: hidden; }
+        .ps-oem-list { max-height: 232px; overflow: auto; border-top: 1px solid #fde68a; background: #fff; }
+        .ps-oem-row { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 10px; padding: 6px 10px; font-size: 13px; border-bottom: 1px dashed #fef3c7; }
+        .ps-oem-row .d { font-weight: 800; color: #92400e; white-space: nowrap; min-width: 116px; }
+        .ps-oem-row.done .d { color: #047857; }
+        .ps-oem-row .c { color: #475569; white-space: nowrap; }
+        .ps-oem-row .i { font-weight: 800; color: #1e293b; }
+        .ps-oem-row .q { font-weight: 800; color: #1e293b; white-space: nowrap; }
+        .ps-oem-row .s { font-size: 11px; color: #64748b; background: #f1f5f9; border-radius: 10px; padding: 1px 6px; white-space: nowrap; }
+        .ps-oem-row em { font-style: normal; font-size: 12px; font-weight: 800; border-radius: 6px; padding: 1px 6px; white-space: nowrap; }
+        .ps-oem-row em.bad { color: #b91c1c; background: #fee2e2; }
+        .ps-oem-row em.warn { color: #c2410c; background: #ffedd5; }
+        .ps-oem-row em.ok { color: #047857; background: #d1fae5; }
+        .ps-oem-row.late .d { color: #b91c1c; }
+        .ps-oem-mark { margin-left: 4px; font-size: 13px; cursor: help; }
         @media (max-width: 560px) {
           .ps-ord-row { grid-template-columns: minmax(0, 1fr) 40px 112px; grid-template-areas: "d f q" "c c a"; row-gap: 2px; }
           .ps-ord-row .d { grid-area: d; } .ps-ord-row .f { grid-area: f; } .ps-ord-row .q { grid-area: q; }
@@ -750,6 +847,7 @@ export default function SchedulePage() {
             anomaly.late.length > 0 && `逾期未出貨 ${anomaly.late.length}`,
             anomaly.soon.length > 0 && `即將到期還沒備貨 ${anomaly.soon.length}`,
             anomaly.noDate.length > 0 && `已排生產、出貨日還沒定 ${anomaly.noDate.length}`,
+            anomaly.prod.length > 0 && `生產區間快到還沒排 ${anomaly.prod.length}`,
           ].filter(Boolean).join('、')}），請到「客訂管理 → 異常狀態（生產部）」查看處理。
         </div>
       )}
@@ -774,6 +872,9 @@ export default function SchedulePage() {
             </div>
           </div>
 
+          {mergeNote && (
+            <div className="ps-merge-note" role="status">🔗 {mergeNote}</div>
+          )}
           {/* 客訂出貨（從客訂管理帶入）：按「− 扣庫存」就在排程表加一列扣除 */}
           <div className="ps-ord">
             <button className="ps-ord-h" onClick={() => setShowOrd(v => !v)} aria-expanded={showOrd}>
@@ -796,11 +897,13 @@ export default function SchedulePage() {
                         <span className="c">{x.warn ? '⚠ ' : ''}{cust}</span>
                         <span className="f">{x.f || '—'}</span>
                         <span className="q" title={x.cv.how}>
-                          <span className="q1">{fmtN(x.cv.bags)}袋 × {x.cv.g}g</span>
+                          <span className="q1">{isApprox(x.o) ? '約 ' : ''}{fmtN(x.cv.bags)}袋 × {x.cv.g}g</span>
                           <span className="q2">＝ {fmtN(x.cv.packs)} 包</span>
                         </span>
                         <span className="s">{ORDER_STAGE[x.o.status] || ''}</span>
-                        {x.packed && !x.row
+                        {x.nc
+                          ? <span className="ps-ord-done" title="排進生產列的「非常規包裝」，由那裡扣庫存">✓ 非常規包裝 {mdOf(x.nc.date)} −{fmtN(x.nc.packs)} 包</span>
+                          : x.packed && !x.row
                           ? <span className="ps-ord-packed">📦 已包裝，不用扣</span>
                           : x.packed
                           ? ( // 先扣過、後來才包裝好：提醒可以刪掉這列扣除
@@ -826,7 +929,7 @@ export default function SchedulePage() {
                   })}
                 </div>
                 <div className="ps-ord-tip">
-                  按「− 扣 N 包」會在下面排程表加一列扣除（日期＝出貨日、包數＝袋數換算成庫存包數，都可以再改），存檔後預估表當天就會扣掉。
+                  按「− 扣 N 包」會在下面排程表加一列扣除（日期＝出貨日、包數＝袋數換算成庫存包數，都可以再改），存檔後預估表當天就會扣掉。排進生產列「非常規包裝」的客訂，由那裡扣（扣在生產那天），不用再按。
                   已到「確認出貨」關卡的客訂（包裝科已完成備貨）貨已經包好，不用再扣。已過出貨日、未填出貨日的客訂請到「客訂管理 → 異常狀態」處理。
                 </div>
               </>
@@ -873,6 +976,40 @@ export default function SchedulePage() {
               </div>
             )}
           </div>
+
+          {/* 🏭 代工：在客訂管理排（排入行程），這裡只列出來 */}
+          {oemList.length > 0 && (
+            <div className="ps-oem">
+              <button className="ps-ord-h ps-oem-h" onClick={() => setShowOem(v => !v)} aria-expanded={showOem}>
+                <strong>🏭 代工</strong>
+                <span style={{ fontSize: 13 }}>{oemList.length} 筆{oemTodo ? `，${oemTodo} 筆還沒排生產日` : '，都排好了'}</span>
+                <span style={{ marginLeft: 'auto', fontSize: 12 }}>{showOem ? '收合 ▲' : '展開 ▼'}</span>
+              </button>
+              {showOem && (
+                <>
+                  <div className="ps-oem-list">
+                    {oemList.map(x => (
+                      <div key={x.o.id} className={`ps-oem-row${x.flag ? ` ${x.flag}` : ''}${x.sd ? ' done' : ''}`}>
+                        <span className="d">
+                          {x.sd ? `${mdOf(x.sd)}（${wdOf(x.sd).slice(1)}）生產`
+                            : x.w ? `區間 ${mdOf(x.w.from)}${x.w.to !== x.w.from ? `～${mdOf(x.w.to)}` : ''}` : '日期未定'}
+                        </span>
+                        <span className="c">{x.o.customer_name || x.o.customerName || ''}</span>
+                        <span className="i">{x.o.item_name || x.o.itemName || ''}</span>
+                        <span className="q">{isApprox(x.o) ? '約 ' : ''}{fmtN(x.o.quantity)} 袋</span>
+                        <span className="s">{OEM_STAGE[x.o.status] || ''}</span>
+                        {x.flag === 'late' && <em className="bad">⚠ 已過區間還沒排</em>}
+                        {x.flag === 'soon' && <em className="warn">⏰ 區間快到了，還沒排</em>}
+                        {x.off && <em className="bad">⚠ 不在客戶區間（{mdOf(x.w.from)}～{mdOf(x.w.to)}）</em>}
+                        {x.sd && x.w && !x.off && <em className="ok">在客戶區間內</em>}
+                      </div>
+                    ))}
+                  </div>
+                  <div className="ps-ord-tip">代工在「客訂管理」按「排入行程」排生產日（會先帶客戶指定區間的第一天）；這裡讓你排自己的產品時，看得到代工哪幾天要做。排好的日子，下面排程表的日期旁邊會標 🏭。</div>
+                </>
+              )}
+            </div>
+          )}
 
           {/* 批次產生 */}
           <div className="ps-gen">
@@ -960,6 +1097,7 @@ export default function SchedulePage() {
                       <td style={{ whiteSpace: 'nowrap' }}>
                         <input type="date" className="inp" value={r.date || ''} onChange={e => updateSch(r.id, 'date', e.target.value)} style={{ width: 132, fontSize: 13 }} aria-label="生產日期" />
                         <span style={{ fontSize: 12, color: r.date && [0, 6].includes(parseIso(r.date)?.getDay()) ? '#c2410c' : '#94a3b8', marginLeft: 4 }}>{wdOf(r.date)}</span>
+                        {oemDays[r.date] && <span className="ps-oem-mark" title={`這天也要做代工：${oemDays[r.date].join('、')}`}>🏭</span>}
                       </td>
                       <td>{itemSelect}</td>
                       <td>
@@ -974,7 +1112,7 @@ export default function SchedulePage() {
                       <td style={{ textAlign: 'right', fontWeight: 700 }}>
                         {pk > 0 ? pk.toLocaleString() : '—'}
                         {r.item && !also.length && alsoOpen !== r.id && (
-                          <button className="ps-also-btn" onClick={() => openAlso(r.id)} title="生產這天順便要包的其他品項（按 📅 會一起寫進 Google 日曆）">＋順便包</button>
+                          <button className="ps-also-btn" onClick={() => openAlso(r.id)} title="生產這天要做的非常規包裝（會扣庫存；按 📅 會一起寫進 Google 日曆）">＋非常規包裝</button>
                         )}
                       </td>
                       <td style={{ whiteSpace: 'nowrap' }}>
@@ -985,7 +1123,7 @@ export default function SchedulePage() {
                         </span>
                       </td>
                       <td>
-                        {gcLink && <a href={gcLink} target="_blank" rel="noreferrer" title={also.length ? `加入 Google 日曆（含順便包 ${also.length} 項）` : '加入 Google 日曆'} style={{ fontSize: 14, textDecoration: 'none', opacity: 0.6 }}>📅</a>}
+                        {gcLink && <a href={gcLink} target="_blank" rel="noreferrer" title={also.length ? `加入 Google 日曆（含非常規包裝 ${also.length} 項）` : '加入 Google 日曆'} style={{ fontSize: 14, textDecoration: 'none', opacity: 0.6 }}>📅</a>}
                       </td>
                     </tr>
                     {showAlso && (
@@ -993,14 +1131,16 @@ export default function SchedulePage() {
                         <td></td>
                         <td colSpan={6}>
                           <div className="ps-also">
-                            <span className="ps-also-h">📦 順便包</span>
+                            <span className="ps-also-h">📦 非常規包裝</span>
                             {also.map(a => {
-                              const ox = a.orderId ? ordById[a.orderId] : null
+                              const n = ncByItem[a.id]
                               return (
                                 <span key={a.id} className="ps-also-chip">
                                   {alsoTxt(a)}
-                                  {ox && !ox.row && !ox.packed && <em title="這筆客訂還沒扣庫存：到上面「客訂出貨」按「− 扣 N 包」">還沒扣庫存</em>}
-                                  <button onClick={() => setAlso(r.id, l => l.filter(y => y.id !== a.id))} title="拿掉" aria-label={`拿掉 ${alsoTxt(a)}`}>×</button>
+                                  {n?.ok && <em className="nc" title={`扣庫存：${n.f} −${fmtN(n.packs)} 包，扣在 ${mdOf(n.date)}（這天生產入庫）｜${n.how}`}>−{fmtN(n.packs)} 包</em>}
+                                  {n?.dup && <em className="no" title="同一筆客訂已經在別天的非常規包裝扣過，這裡不再扣">已在 {mdOf(n.dup.date)} 扣</em>}
+                                  {n && !n.ok && !n.dup && <em className="no" title={n.why}>不扣庫存</em>}
+                                  <button onClick={() => removeAlso(r, a)} title="拿掉" aria-label={`拿掉 ${alsoTxt(a)}`}>×</button>
                                 </span>
                               )
                             })}
@@ -1021,17 +1161,21 @@ export default function SchedulePage() {
                               </select>
                               <span>或自己填</span>
                               <input className="inp" list="ps-also-list" value={alsoDraft.item} onChange={e => setAlsoDraft(d => ({ ...d, item: e.target.value }))}
-                                onKeyDown={e => e.key === 'Enter' && addAlsoDraft(r)} placeholder="品項" style={{ width: 84 }} aria-label="順便包品項" />
+                                onKeyDown={e => e.key === 'Enter' && addAlsoDraft(r)} placeholder="品項" style={{ width: 84 }} aria-label="非常規包裝品項" />
                               <input className="inp" inputMode="decimal" value={alsoDraft.qty} onChange={e => setAlsoDraft(d => ({ ...d, qty: cleanNum(e.target.value) }))}
-                                onKeyDown={e => e.key === 'Enter' && addAlsoDraft(r)} placeholder="數量" style={{ width: 62, textAlign: 'right' }} aria-label="順便包數量" />
-                              <select className="inp" value={alsoDraft.unit} onChange={e => setAlsoDraft(d => ({ ...d, unit: e.target.value }))} style={{ width: 54 }} aria-label="順便包單位">
+                                onKeyDown={e => e.key === 'Enter' && addAlsoDraft(r)} placeholder="數量" style={{ width: 62, textAlign: 'right' }} aria-label="非常規包裝數量" />
+                              <select className="inp" value={alsoDraft.unit} onChange={e => setAlsoDraft(d => ({ ...d, unit: e.target.value }))} style={{ width: 54 }} aria-label="非常規包裝單位">
                                 {ALSO_UNITS.map(u => <option key={u} value={u}>{u}</option>)}
                               </select>
+                              {alsoDraft.unit === '袋' && (
+                                <input className="inp" inputMode="numeric" value={alsoDraft.g} onChange={e => setAlsoDraft(d => ({ ...d, g: cleanNum(e.target.value) }))}
+                                  onKeyDown={e => e.key === 'Enter' && addAlsoDraft(r)} placeholder="每袋g" style={{ width: 62, textAlign: 'right' }} aria-label="非常規包裝每袋重量" />
+                              )}
                               <input className="inp" value={alsoDraft.note} onChange={e => setAlsoDraft(d => ({ ...d, note: e.target.value }))}
-                                onKeyDown={e => e.key === 'Enter' && addAlsoDraft(r)} placeholder="說明（客戶、規格）" style={{ width: 130 }} aria-label="順便包說明" />
+                                onKeyDown={e => e.key === 'Enter' && addAlsoDraft(r)} placeholder="說明（客戶、規格）" style={{ width: 130 }} aria-label="非常規包裝說明" />
                               <button className="btn btn-dark btn-sm" onClick={() => addAlsoDraft(r)} style={{ fontSize: 12 }}>加入</button>
                               <button className="btn btn-sm" onClick={() => setAlsoOpen(null)} style={{ fontSize: 12, background: '#f1f5f9', color: '#475569' }}>完成</button>
-                              <span style={{ width: '100%', color: '#a16207' }}>只記在排程和 Google 日曆上，不會扣庫存；客訂要扣庫存請用上面「客訂出貨」的「− 扣 N 包」。</span>
+                              <span style={{ width: '100%', color: '#a16207' }}>會扣庫存（扣在這天生產入庫的日期），也會寫進 Google 日曆。客訂直接選就好；自己填的單位選「包」，或選「袋」並填每袋重量，才會扣庫存。</span>
                             </div>
                           )}
                         </td>
@@ -1069,7 +1213,7 @@ export default function SchedulePage() {
             )}
             <span style={{ fontSize: 13, color: '#64748b' }}>
               合計 生產 <strong style={{ color: '#047857' }}>{tot > 0 ? `+${tot.toLocaleString()} 包` : '—'}</strong>
-              {outTot > 0 && <>　扣除 <strong style={{ color: '#b91c1c' }}>−{fmtN(outTot)} 包</strong></>}
+              {outTot + ncTot > 0 && <>　扣除 <strong style={{ color: '#b91c1c' }}>−{fmtN(outTot + ncTot)} 包</strong>{ncTot > 0 && <span style={{ fontSize: 12 }}>（含非常規包裝 −{fmtN(ncTot)}）</span>}</>}
             </span>
           </div>
 
