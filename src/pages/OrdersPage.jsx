@@ -77,6 +77,8 @@ function packItems(o, boxes) {
 export const shipDateOf = o => toIso(o.target_date || o.targetDate)
 // 客戶指定的生產區間（代工常用：例如里仁給 11/23～11/25，生產排程科在區間內排）：cs.prodFrom／cs.prodTo
 export const prodWinOf = o => { const f = toIso(o?.cs?.prodFrom || ''), t = toIso(o?.cs?.prodTo || ''); return f && t ? { from: f, to: t } : null }
+// 代工客戶一開始常只說大概（例如「月底」）：新增時記在 cs.prodHint（文字）；客戶給了幾號～幾號，按「確認訂單」時再填生產區間
+export const prodHintOf = o => String(o?.cs?.prodHint || '').trim()
 // 數量是大概的（客戶還沒定量，例如里仁「約 1440 袋」）：cs.qtyApprox
 export const isApprox = o => !!o?.cs?.qtyApprox
 
@@ -276,6 +278,7 @@ export default function OrdersPage({ user }) {
   const [pendingOrderData, setPendingOrderData] = useState(null)
   const [formError, setFormError] = useState('')
   const [statusModal, setStatusModal] = useState(null) // {order, nextStatus, label}
+  const [confWin, setConfWin] = useState({ from: '', to: '', open: false }) // 確認訂單時填的客戶指定生產區間（代工）
   const [statusDate, setStatusDate] = useState('')
   const submitActionRef = useRef('normal')
   const [useBoxCalc, setUseBoxCalc] = useState(false)
@@ -298,7 +301,7 @@ export default function OrdersPage({ user }) {
     pack: EMPTY_PACK,
     merge: EMPTY_MERGE, // 存檔時放進 cs.merge（資料庫沒有 merge 欄位）
     payDate: '', leadDays: LEAD_DAYS, // 付款日、交期天數：存檔時放進 cs
-    prodFrom: '', prodTo: '', qtyApprox: false, // 客戶指定生產區間、數量是大概的：存檔時放進 cs
+    prodFrom: '', prodTo: '', qtyApprox: false, prodHint: '', // 客戶指定生產區間、數量是大概的、大概什麼時候做：存檔時放進 cs
   }
   const [formData, setFormData] = useState(emptyForm)
 
@@ -549,6 +552,9 @@ export default function OrdersPage({ user }) {
   const calcedQty = (parseInt(boxCountInput) || 0) * perBoxNow
 
   const formIsPre = !editingOrderId || orders.find(o => o.id === editingOrderId)?.status === 'preorder' // 新單或預排中的單
+  // 代工品：預排時只記「大概什麼時候做」；生產區間在「確認訂單」時填，確認後（或原本就有區間）才在這裡改
+  const formOem = !!(itemSpecs[String(formData.item_name || '').trim()]?.oem || specOem || formData.pack?.oem)
+  const formShowWin = !!editingOrderId && (!formIsPre || !!prodWinOf(orders.find(o => o.id === editingOrderId)))
   const handleFormSubmit = e => {
     e.preventDefault()
     setFormError('')
@@ -601,7 +607,7 @@ export default function OrdersPage({ user }) {
     const existingOrder = orders.find(o => o.id === editingOrderId)
     try {
       const now = new Date().toISOString()
-      const { merge, payDate, leadDays, prodFrom, prodTo, qtyApprox, ...data } = pendingOrderData // 併櫃、付款日、生產區間、約略數量不是資料庫欄位，放進 cs
+      const { merge, payDate, leadDays, prodFrom, prodTo, qtyApprox, prodHint, ...data } = pendingOrderData // 併櫃、付款日、生產區間、約略數量、大概時間不是資料庫欄位，放進 cs
       const row = {
         id, ...data,
         status: existingOrder?.status || 'preorder', // 新接的單先放「預排客訂」，客服確認後才到等待排程
@@ -616,6 +622,7 @@ export default function OrdersPage({ user }) {
       row.cs = applyShip(row.cs, { payDate, leadDays, merge })
       if (prodFrom && prodTo) { row.cs.prodFrom = prodFrom; row.cs.prodTo = prodTo } else { delete row.cs.prodFrom; delete row.cs.prodTo }
       if (qtyApprox) row.cs.qtyApprox = true; else delete row.cs.qtyApprox
+      if (String(prodHint || '').trim()) row.cs.prodHint = String(prodHint).trim(); else delete row.cs.prodHint
       let { error } = await supabase.from('adv_orders').upsert(row)
       const missing = []
       while (error && COL_SQL[missingCol(error)] && !missing.includes(missingCol(error))) { // 資料庫還沒有 pack／cs 欄位
@@ -663,7 +670,7 @@ export default function OrdersPage({ user }) {
       ...emptyForm, ...order, pack: { ...EMPTY_PACK, ...(order.pack || {}) }, merge: mergeOf(order),
       items_per_box: order.items_per_box || order.box_qty_each || '',
       payDate: order.cs?.payDate || '', leadDays: order.cs?.leadDays || LEAD_DAYS,
-      prodFrom: toIso(order.cs?.prodFrom || ''), prodTo: toIso(order.cs?.prodTo || ''), qtyApprox: !!order.cs?.qtyApprox,
+      prodFrom: toIso(order.cs?.prodFrom || ''), prodTo: toIso(order.cs?.prodTo || ''), qtyApprox: !!order.cs?.qtyApprox, prodHint: order.cs?.prodHint || '',
     })
     if ((order.box_count||0) > 0) { setUseBoxCalc(true); setBoxCountInput(String(order.box_count)) }
     setEditingOrderId(order.id); setIsFormOpen(true)
@@ -785,7 +792,11 @@ export default function OrdersPage({ user }) {
     setStatusErr('')
     const idx = STATES.indexOf(o.status)
     if (idx < 0 || o.status === 'shipped') return
-    if (o.status === 'preorder') setShipSt(shipStOf(o)) // 確認訂單：帶入付款日、併櫃、預計出貨日
+    if (o.status === 'preorder') { // 確認訂單：帶入付款日、併櫃、預計出貨日；代工（或已有區間、大概時間）的生產區間直接打開
+      setShipSt(shipStOf(o))
+      const w = prodWinOf(o)
+      setConfWin({ from: w?.from || '', to: w?.to || '', open: !!(w || prodHintOf(o) || isOemOrder(o, itemSpecs)) })
+    }
     else if (o.status === 'pending') setStatusDate(toIso(o.scheduled_date || o.scheduledDate) || prodWinOf(o)?.from || formatDate(new Date())) // 排入行程：已經填過排程生產日就帶入；有客戶指定區間就先帶區間第一天
     else setStatusDate(formatDate(new Date()))
     setStatusModal({ order: o, nextStatus: STATES[idx + 1], label: NEXT_ACTION[o.status] })
@@ -1050,6 +1061,28 @@ export default function OrdersPage({ user }) {
     </div>
   )
   // 排入行程：提醒出貨日、交期（生產日不要比這兩個晚）
+  // 確認訂單視窗：客戶指定生產區間（代工：客戶說「幾號～幾號之間做」）。非代工先收起來
+  const renderConfWin = o => {
+    const hint = prodHintOf(o)
+    if (!confWin.open) return (
+      <button type="button" className="op-confwin-open" onClick={() => setConfWin(c => ({ ...c, open: true }))} style={{ background: 'none', border: 'none', color: '#a16207', fontWeight: 800, fontSize: 13, cursor: 'pointer', padding: '0 0 12px', fontFamily: 'inherit' }}>＋ 客戶有指定生產區間？</button>
+    )
+    const set = (k, v) => { setStatusErr(''); setConfWin(c => { const n = { ...c, [k]: v }; if (k === 'from' && v && (!c.to || c.to < v)) n.to = v; return n }) }
+    const inp = { width: '100%', minWidth: 0, background: '#fff', border: '1px solid #fde68a', borderRadius: 10, padding: '9px', fontFamily: 'inherit', fontSize: 15 }
+    return (
+      <div className="op-confwin" style={{ background: '#fffbeb', border: '1px solid #fde68a', borderRadius: 14, padding: '10px 12px', marginBottom: 12 }}>
+        <div style={{ fontSize: 13, color: '#92400e', fontWeight: 800, marginBottom: 4 }}>🗓 客戶指定生產區間 <span style={{ fontWeight: 400, color: '#a16207', fontSize: 12 }}>（客戶說幾號～幾號之間做；還不知道可以空著）</span></div>
+        {hint && <div style={{ fontSize: 13, color: '#a16207', marginBottom: 6 }}>客戶原本說：<b>{hint}</b></div>}
+        <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0,1fr) auto minmax(0,1fr)', gap: 6, alignItems: 'center' }}>
+          <input type="date" value={confWin.from} onChange={e => set('from', e.target.value)} aria-label="生產區間開始" style={inp} />
+          <span style={{ color: '#a16207', fontWeight: 800 }}>～</span>
+          <input type="date" value={confWin.to} onChange={e => set('to', e.target.value)} aria-label="生產區間結束" style={inp} />
+        </div>
+        <div style={{ fontSize: 12, color: '#a16207', marginTop: 6 }}>只有一天就兩格填一樣；生產排程科會排在這幾天內。</div>
+      </div>
+    )
+  }
+
   const renderDueInfo = (o, prod) => {
     const td = shipDateOf(o), due = o.cs?.due || '', w = prodWinOf(o)
     const limit = [td, due].filter(Boolean).sort()[0] || ''
@@ -1059,6 +1092,7 @@ export default function OrdersPage({ user }) {
         {due && <div>⏰ 交期：<b>{mdw(due)}</b>（{mdOf(o.cs.payDate)} 付款後 {o.cs.leadDays || LEAD_DAYS} 個工作天）</div>}
         {prod && limit && prod > limit && <div style={{ color: '#dc2626', fontWeight: 800 }}>⚠ 生產日比{limit === td ? '出貨日' : '交期'}晚</div>}
         {w && <div>🗓 客戶指定生產區間：<b>{winTxt(w)}</b>（請排在這幾天內）</div>}
+        {!w && prodHintOf(o) && <div>🗓 客戶說大概：<b>{prodHintOf(o)}</b>（還沒給確切區間）</div>}
         {w && prod && (prod < w.from || prod > w.to) && <div style={{ color: '#dc2626', fontWeight: 800 }}>⚠ 排程生產日不在客戶指定的區間</div>}
         {isApprox(o) && <div>數量是大概的（約 {o.quantity} 袋），量定了記得改</div>}
       </div>
@@ -1477,6 +1511,11 @@ export default function OrdersPage({ user }) {
                                 🗓 生產區間 {winTxt(w)}{late ? '・已過還沒排' : soonW ? '・快到了' : off ? '・排程日不在區間內' : ''}
                               </span>
                             })()}
+                            {!prodWinOf(o) && prodHintOf(o) && (
+                              <span className="op-hint-chip" title="客戶說的大概時間；客戶給了幾號～幾號，按「確認訂單」時再填生產區間" style={{ fontSize: 12, background: '#f8fafc', color: '#854d0e', border: '1px dashed #eab308', padding: '1px 8px', borderRadius: 6, fontWeight: 800 }}>
+                                🗓 大概 {prodHintOf(o)}・區間還沒定
+                              </span>
+                            )}
                           </div>
                         </div>
                         <div style={{ textAlign: 'right' }}>
@@ -1666,6 +1705,7 @@ export default function OrdersPage({ user }) {
               </div>
             )}
             {statusModal.order.status === 'preorder' && <>
+              {renderConfWin(statusModal.order)}
               {renderPay(shipSt, setShipP)}
               {renderMerge(shipSt.merge, p => setShipP({ merge: p }), shipSt.ship, false)}
               {renderShipDate(shipSt, setShipP, false)}
@@ -1689,9 +1729,12 @@ export default function OrdersPage({ user }) {
                 const updateData = { status: statusModal.nextStatus, updated_at: now }
                 if (o.status === 'pending') updateData.scheduled_date = statusDate
                 if (o.status === 'preorder') { // 確認訂單：出貨日可以先空著；記下誰、什麼時候確認；付款日、併櫃一起存
+                  if (!!confWin.from !== !!confWin.to) { setStatusErr('生產區間要填開始和結束（只有一天就兩格填一樣）'); return }
+                  if (confWin.from && confWin.to < confWin.from) { setStatusErr('生產區間的結束日比開始日早'); return }
                   if (shipSt.merge.on && !shipSt.merge.date) { setStatusErr('請填併櫃日期（不併櫃的話把勾勾取消）'); return }
                   updateData.target_date = shipSt.ship || ''
                   updateData.cs = applyShip({ ...(o.cs || {}), receivedAt: o.cs?.receivedAt || o.created_at, owner: o.cs?.owner || me, confirmedAt: now, confirmedBy: me, next: '' }, shipSt)
+                  if (confWin.from) { updateData.cs.prodFrom = confWin.from; updateData.cs.prodTo = confWin.to } else { delete updateData.cs.prodFrom; delete updateData.cs.prodTo }
                 }
                 const { error } = await updateOrder(o.id, updateData, '狀態已更新，但')
                 if (error) { alert('狀態更新失敗：' + error.message); return }
@@ -1842,6 +1885,7 @@ export default function OrdersPage({ user }) {
               <div style={{ fontSize: 14, color: '#64748b', marginBottom: 3 }}>客戶：<strong style={{ color: '#1e293b' }}>{pendingOrderData.customer_name}</strong></div>
               <div style={{ fontSize: 14, color: '#64748b', marginBottom: 3 }}>品項：<strong style={{ color: '#4f46e5' }}>{pendingOrderData.item_name}</strong></div>
               {pendingOrderData.prodFrom && <div style={{ fontSize: 14, color: '#64748b', marginBottom: 3 }}>客戶指定生產區間：<strong style={{ color: '#a16207' }}>{winTxt({ from: pendingOrderData.prodFrom, to: pendingOrderData.prodTo })}</strong></div>}
+              {!pendingOrderData.prodFrom && String(pendingOrderData.prodHint || '').trim() && <div style={{ fontSize: 14, color: '#64748b', marginBottom: 3 }}>大概什麼時候做：<strong style={{ color: '#a16207' }}>{String(pendingOrderData.prodHint).trim()}</strong>（區間等確認訂單時再填）</div>}
               <div style={{ fontSize: 14, color: '#64748b', marginBottom: 10 }}>出貨日：<strong style={{ color: pendingOrderData.target_date ? '#dc2626' : '#94a3b8' }}>{pendingOrderData.target_date || '未定（排好生產再定）'}</strong></div>
               <div style={{ display: 'flex', justifyContent: 'space-between', borderTop: '1px solid #e2e8f0', paddingTop: 10 }}>
                 <div>
@@ -2142,9 +2186,17 @@ export default function OrdersPage({ user }) {
               )
             })()}
 
-            {/* 9. 日期：客戶指定生產區間（代工常用）、排程生產日、出貨日（不知道可以先空著）、付款日 → 交期、併櫃 */}
+            {/* 9. 日期：大概什麼時候做（代工、預排時）／客戶指定生產區間（確認訂單後才改這裡）、排程生產日、出貨日（不知道可以先空著）、付款日 → 交期、併櫃 */}
+            {formIsPre && formOem && (
+              <div className="op-prodhint" style={{ background: '#fffbeb', border: '1px solid #fde68a', borderRadius: 14, padding: '10px 12px', marginBottom: 10 }}>
+                <div style={{ fontSize: 13, color: '#92400e', fontWeight: 800, marginBottom: 6 }}>🗓 大概什麼時候做 <span style={{ fontWeight: 400, color: '#a16207', fontSize: 12 }}>（代工：客戶怎麼說就怎麼寫；選填）</span></div>
+                <input type="text" name="prodHint" value={formData.prodHint || ''} onChange={handleInputChange} maxLength={20} placeholder="例：月底、12 月上旬" aria-label="大概什麼時候做" style={{ width: '100%', background: '#fff', border: '1px solid #fde68a', borderRadius: 10, padding: '9px 10px', fontFamily: 'inherit', fontSize: 15 }} />
+                <div style={{ fontSize: 12, color: '#a16207', marginTop: 6 }}>客戶給了幾號～幾號，到卡片上按「確認訂單」時再填生產區間。</div>
+              </div>
+            )}
+            {formShowWin && (
             <div className="op-prodwin" style={{ background: '#fffbeb', border: '1px solid #fde68a', borderRadius: 14, padding: '10px 12px', marginBottom: 10 }}>
-              <div style={{ fontSize: 13, color: '#92400e', fontWeight: 800, marginBottom: 6 }}>🗓 客戶指定生產區間 <span style={{ fontWeight: 400, color: '#a16207', fontSize: 12 }}>（代工常用：生產排程科在這幾天內排；不知道可以空著）</span></div>
+              <div style={{ fontSize: 13, color: '#92400e', fontWeight: 800, marginBottom: 6 }}>🗓 客戶指定生產區間 <span style={{ fontWeight: 400, color: '#a16207', fontSize: 12 }}>（生產排程科在這幾天內排；客戶改日期就改這裡）</span></div>
               <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0,1fr) auto minmax(0,1fr)', gap: 6, alignItems: 'center' }}>
                 <input type="date" name="prodFrom" value={formData.prodFrom || ''} onChange={handleInputChange} aria-label="生產區間開始" style={{ width: '100%', minWidth: 0, background: '#fff', border: '1px solid #fde68a', borderRadius: 10, padding: '9px', fontFamily: 'inherit', fontSize: 15 }} />
                 <span style={{ color: '#a16207', fontWeight: 800 }}>～</span>
@@ -2154,6 +2206,7 @@ export default function OrdersPage({ user }) {
                 <div style={{ color: '#dc2626', fontWeight: 800, fontSize: 13, marginTop: 6 }}>⚠ 排程生產日不在客戶指定的區間</div>
               )}
             </div>
+            )}
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 12 }}>
               <div>
                 <div style={{ fontSize: 13, color: '#059669', fontWeight: 700, marginBottom: 4 }}>排程生產日</div>

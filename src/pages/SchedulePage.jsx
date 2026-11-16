@@ -3,7 +3,7 @@ import { supabase } from '../lib/supabase'
 import { fmtDT, loadPage, loadLogs, savePageData, addLog, AdjustLog } from '../lib/pageSave'
 import { DEFAULT_PPB, DEFAULT_MAX_CAP, isoOf, parseIso, addDays, wdOf, mdOf, todayIso, toIso, WD } from '../lib/flavors'
 import { flavorGroups } from './SalesPage' // 品項與分類跟著銷售計畫
-import { orderAnomalies, shipDateOf, isOemOrder, prodWinOf, isApprox } from './OrdersPage'
+import { orderAnomalies, shipDateOf, isOemOrder, prodWinOf, prodHintOf, isApprox } from './OrdersPage'
 
 // ③ 生產排程（生產排程科）＝ Excel「3.生產排程表」＋「庫存量預估表」
 // 每日庫存 ＝ 前一天庫存 − 每日預估銷售量（含節日加乘）− 當天已確定銷售量 ＋ 當天入庫量
@@ -992,7 +992,7 @@ export default function SchedulePage() {
                       <div key={x.o.id} className={`ps-oem-row${x.flag ? ` ${x.flag}` : ''}${x.sd ? ' done' : ''}`}>
                         <span className="d">
                           {x.sd ? `${mdOf(x.sd)}（${wdOf(x.sd).slice(1)}）生產`
-                            : x.w ? `區間 ${mdOf(x.w.from)}${x.w.to !== x.w.from ? `～${mdOf(x.w.to)}` : ''}` : '日期未定'}
+                            : x.w ? `區間 ${mdOf(x.w.from)}${x.w.to !== x.w.from ? `～${mdOf(x.w.to)}` : ''}` : prodHintOf(x.o) ? `大概 ${prodHintOf(x.o)}` : '日期未定'}
                         </span>
                         <span className="c">{x.o.customer_name || x.o.customerName || ''}</span>
                         <span className="i">{x.o.item_name || x.o.itemName || ''}</span>

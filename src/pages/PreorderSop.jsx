@@ -3,6 +3,7 @@ import { useEffect, useRef } from 'react'
 // 預排客訂 SOP（快速上手）：客訂管理 →「預排客訂」分頁最上面的「📖 預排客訂 SOP」打開
 // 截圖放在 public/sop/（網址 /sop/…）。流程或畫面有改：重拍截圖，並在 SOP_REVISIONS 最上面加一行，更新日期會跟著變
 export const SOP_REVISIONS = [
+  { date: '2026-11-16', note: '代工：生產區間改在「確認訂單」時填；新增只記「大概什麼時候做」' },
   { date: '2026-11-16', note: '初版：新增、記一筆追蹤、確認訂單、未成交；代工的生產區間與約略數量' },
 ]
 export const SOP_UPDATED = SOP_REVISIONS[0].date
@@ -14,13 +15,16 @@ const C = { main: '#0e7490', dark: '#164e63', soft: '#ecfeff', line: '#a5f3fc', 
 const IMG = {
   'preorder-01-overview.png': [1600, 1115],
   'preorder-02-form-top.png': [904, 632],
-  'preorder-03-form-bottom.png': [888, 814],
+  'preorder-03-form-bottom.png': [888, 588],
   'preorder-04-card.png': [996, 638],
   'preorder-05-followup.png': [932, 696],
-  'preorder-06-confirm.png': [840, 1050],
+  'preorder-06-confirm.png': [840, 1112],
   'preorder-07-lost.png': [720, 718],
-  'preorder-08-oem-card.png': [996, 732],
-  'preorder-09-oem-list.png': [554, 212],
+  'preorder-08-oem-card.png': [956, 620],
+  'preorder-09-oem-list.png': [1600, 419],
+  'preorder-10-oem-new.png': [856, 258],
+  'preorder-11-oem-confirm.png': [840, 1372],
+  'preorder-12-oem-pending.png': [956, 464],
 }
 
 const SECTIONS = [
@@ -37,8 +41,8 @@ const H = ({ id, children }) => (
   <h3 id={id} style={{ scrollMarginTop: 118, fontSize: 19, fontWeight: 900, color: C.dark, margin: '30px 0 10px', paddingBottom: 6, borderBottom: `2px solid ${C.line}` }}>{children}</h3>
 )
 const P = ({ children, style }) => <p style={{ margin: '0 0 10px', lineHeight: 1.75, ...style }}>{children}</p>
-const Ol = ({ items }) => (
-  <ol style={{ margin: '0 0 12px', paddingLeft: 24, lineHeight: 1.75 }}>
+const Ol = ({ items, start }) => (
+  <ol start={start} style={{ margin: '0 0 12px', paddingLeft: 24, lineHeight: 1.75 }}>
     {items.map((t, i) => <li key={i} style={{ marginBottom: 4 }}>{t}</li>)}
   </ol>
 )
@@ -154,11 +158,11 @@ export default function PreorderSop({ onClose }) {
             '依序填：客戶名稱 → 品項規格 → 訂購數量。打品項名稱會自動帶入每袋重量、箱子、包材等固定規格。',
             '數量還不確定，就勾數量旁邊的「約（大概的量）」。',
             '特殊備註、併箱口味、理貨與裝箱、包材：有特殊需求才改，固定品項已經帶好。',
-            '最下面的日期都可以空著；代工客戶有給生產區間，就填「客戶指定生產區間」（見「代工」）。',
+            '最下面的日期都可以空著。代工品會多一格「🗓 大概什麼時候做」（見「代工」）；生產區間等客戶給了幾號～幾號，按「確認訂單」時再填。',
             '按「確認儲存」，看一下確認視窗，再按「確認無誤，正式存檔」。',
           ]} />
           <Shot src="preorder-02-form-top.png" alt="新增客訂表單：上半" cap="① 客戶名稱　② 品項規格（打字搜尋）　③ 訂購數量　④ 約（大概的量）" />
-          <Shot src="preorder-03-form-bottom.png" alt="新增客訂表單：下半" cap="① 客戶指定生產區間（代工才填）　② 確認儲存" />
+          <Shot src="preorder-03-form-bottom.png" alt="新增客訂表單：下半" cap="① 預計出貨日（不知道可以空著）　② 確認儲存" />
           <P>存好後卡片會出現在「預排客訂」，負責人就是你。</P>
 
           <H id="sop-log">步驟 2　每次聯絡客戶，記一筆追蹤</H>
@@ -186,6 +190,7 @@ export default function PreorderSop({ onClose }) {
             '按「確認訂單 ›」。',
             <>視窗裡的欄位都是選填：
               <Ul items={[
+                '客戶指定生產區間：代工品會直接打開（見「代工」）；一般品項客戶有指定日期，才點「＋ 客戶有指定生產區間？」。',
                 '付款日：要先付款才排生產的單才填；填了自動算交期（付款日後 20 個工作天）。',
                 '併櫃：這批要跟別的貨一起上櫃才勾。',
                 '預計出貨日：不知道就先空著。',
@@ -193,7 +198,7 @@ export default function PreorderSop({ onClose }) {
             </>,
             '按視窗下方的「確認 確認訂單」。',
           ]} />
-          <Shot src="preorder-06-confirm.png" alt="確認訂單視窗" cap="① 付款日（選填，填了自動算交期）　② 確認 確認訂單" />
+          <Shot src="preorder-06-confirm.png" alt="確認訂單視窗" cap="① 客戶有指定生產區間才點開　② 付款日（選填，填了自動算交期）　③ 確認 確認訂單" />
           <P>出貨日先空著的單：等生產排程科排好生產日，「預排客訂」上方會出現「🚚 已排好生產、等客服定出貨日」，按「🚚 定出貨日」補上就好。</P>
 
           <H id="sop-lost">步驟 4　沒成交 → 按「未成交」</H>
@@ -205,22 +210,31 @@ export default function PreorderSop({ onClose }) {
           ]} />
 
           <H id="sop-oem">代工（里仁等）要多做的</H>
-          <P>代工客戶常只給「生產區間」和大概的數量；建單時把這兩項填進欄位，生產排程科排程時就看得到。</P>
+          <P>代工客戶常先說大概的時間（例如「月底要做」）和大概的數量，日期快到了才給「幾號～幾號之間做」。所以<b>新增時只記大概，確認訂單時才填生產區間</b>。</P>
           <Ol items={[
-            '「客戶指定生產區間」填開始～結束。只知道「下旬」就先填 21～30 日，之後再改窄；只有一天就兩格填一樣。',
-            '數量還不確定就勾「約（大概的量）」，卡片會顯示「約 1440 袋」；量定了把數字改掉、取消勾選。',
-            '卡片會顯示「🗓 生產區間 11/24～11/26」：快到了變橘色，過了還沒排變紅色。',
-            '生產排程科在「生產排程」頁的「🏭 代工」清單看得到這張單；按「排入行程」時會先帶區間第一天，排到區間外會紅字警告。',
+            '新增：數量還不確定就勾「約（大概的量）」；「🗓 大概什麼時候做」照客戶說的寫，例如「月底」。',
+            '下次追蹤日排在那之前幾天，提醒自己去問確切日期（「大概」是文字，系統不會自動提醒）。',
           ]} />
-          <Shot src="preorder-08-oem-card.png" alt="代工卡片" cap="① 生產區間　② 約的數量" />
-          <Shot src="preorder-09-oem-list.png" alt="生產排程頁的代工清單" cap="生產排程科在「生產排程」頁看到的「🏭 代工」清單：區間、排定的生產日、提醒" />
-          <P style={{ background: '#fffbeb', border: '1px solid #fde68a', borderRadius: 10, padding: '8px 12px', color: '#92400e', fontWeight: 700 }}>⚠ 區間不要只寫在追蹤紀錄的文字裡，系統讀不到。</P>
+          <Shot src="preorder-10-oem-new.png" alt="新增客訂：大概什麼時候做" cap="① 大概什麼時候做（代工品才有這格）" />
+          <Shot src="preorder-08-oem-card.png" alt="代工預排卡片" cap="① 大概的時間（生產排程頁的代工清單也看得到）　② 約的數量" />
+          <Ol start={3} items={[
+            '客戶給了幾號～幾號 → 按卡片上的「確認訂單 ›」，視窗最上面「🗓 客戶指定生產區間」填開始～結束（只有一天就兩格填一樣），再按「確認 確認訂單」。',
+          ]} />
+          <Shot src="preorder-11-oem-confirm.png" alt="確認訂單：填客戶指定生產區間" cap="① 填客戶給的幾號～幾號（上面會提示客戶原本說的）　② 確認 確認訂單" />
+          <Ol start={4} items={[
+            '確認後卡片顯示「🗓 生產區間 M/D～M/D」：快到了變橘色，過了還沒排變紅色。客戶改日期 → 按 ✏️ 改區間。',
+            '生產排程科在「生產排程」頁的「🏭 代工」清單看得到；按「排入行程」時會先帶區間第一天，排到區間外會紅字警告。',
+          ]} />
+          <Shot src="preorder-12-oem-pending.png" alt="等待排程的代工卡片" cap="① 生產區間（快到了變橘色）" />
+          <Shot src="preorder-09-oem-list.png" alt="生產排程頁的代工清單" cap="生產排程頁的「🏭 代工」清單：大概的時間、區間、排定的生產日、提醒" />
+          <P style={{ background: '#fffbeb', border: '1px solid #fde68a', borderRadius: 10, padding: '8px 12px', color: '#92400e', fontWeight: 700 }}>⚠ 生產區間不要只寫在追蹤紀錄或備註裡，系統讀不到；客戶給了日期就按「確認訂單」填進去。</P>
 
           <H id="sop-faq">常見問題</H>
           <Table head={['問題', '怎麼做']} rows={[
             ['負責人顯示「使用者」', '登入功能上線前建的舊單；之後新建、新記的都會是真名'],
             ['看到登入畫面', '從公司入口點「生產排程」進來會自動登入；直接開網址就用入口的帳號密碼'],
             ['要改數量、品項、日期', '按卡片上的 ✏️，改完存檔'],
+            ['代工客戶改了生產日期', '已確認的單按 ✏️，改「客戶指定生產區間」'],
             ['建錯單', '按 🗑 永久刪除（會先問你確定）；客戶沒要的單請用「未成交」'],
             ['未成交的單客戶又要了', '到最下面「未成交紀錄」恢復'],
             ['共用電腦、平板', '用完按右上角「登出」，下一個人才不會記成你的名字'],
