@@ -1,8 +1,13 @@
 import { useState, useEffect, useMemo, useRef } from 'react'
 import { supabase } from '../lib/supabase'
-import { toIso, todayIso, addDays, isoOf, parseIso, mdOf, wdOf } from '../lib/flavors'
+import { toIso, todayIso, addDays, isoOf, parseIso, mdOf, wdOf, DEFAULT_PPB, DEFAULT_MAIN, DEFAULT_SUB } from '../lib/flavors'
 import { loadPage, savePageData } from '../lib/pageSave'
 import PreorderSop, { SOP_UPDATED, sopDate } from './PreorderSop'
+import { flavorGroups } from './SalesPage' // 口味清單跟著銷售計畫（算桶數用）
+
+// 桶數換算（跟生產排程頁一樣）：客訂袋數 → 包數（固定換算，或每袋重量 ÷ 800g）→ ÷ 該口味每桶幾包
+const DEFAULT_CONV = { baseG: 800, rules: [{ f: '', g: 800, p: 1 }, { f: '', g: 400, p: 0.5 }, { f: '', g: 5250, p: 6.5 }] }
+const fmtNum = n => (Math.round((Number(n) || 0) * 10) / 10).toLocaleString()
 
 // 訂單流程（資料庫狀態值不變，只改顯示名稱）：
 // 預排客訂(客戶服務科) → 等待排程(生產排程科) → 包材準備(原物料倉庫管理科) → 完成備貨(包裝科) → 確認出貨(出貨交運科) → 完成出貨
@@ -128,7 +133,7 @@ export const workdaysAfter = (iso, n) => {
   return d || ''
 }
 // 出貨安排（確認訂單、定出貨日共用）：付款日、交期天數、出貨日、併櫃
-const EMPTY_SHIP = { payDate: '', leadDays: LEAD_DAYS, ship: '', merge: EMPTY_MERGE }
+const EMPTY_SHIP = { payDate: '', leadDays: LEAD_DAYS, ship: '', merge: EMPTY_MERGE, arrive: '' }
 const dueOf = st => (st?.payDate ? workdaysAfter(st.payDate, Number(st.leadDays) || LEAD_DAYS) : '')
 const applyShip = (cs, st) => {
   const n = { ...(cs || {}) }
@@ -136,6 +141,7 @@ const applyShip = (cs, st) => {
   else { delete n.payDate; delete n.leadDays; delete n.due }
   if (st.merge?.on) n.merge = { on: true, date: st.merge.date, time: (st.merge.time || '').trim(), place: st.merge.place || '' }
   else delete n.merge
+  if (st.arrive && !st.merge?.on) n.arrive = st.arrive; else delete n.arrive // 到貨日（併櫃的不用）
   return n
 }
 // 包材一行字（品項固定規格、卡片用）
@@ -281,6 +287,8 @@ export default function OrdersPage({ user }) {
   const [statusModal, setStatusModal] = useState(null) // {order, nextStatus, label}
   const [confWin, setConfWin] = useState({ from: '', to: '', open: false }) // 確認訂單時填的客戶指定生產區間（代工）
   const [statusDate, setStatusDate] = useState('')
+  const [statusBarrels, setStatusBarrels] = useState('') // 排入行程：幾桶（Google 日曆標題「里仁剝皮*4桶」）
+  const [prodCfg, setProdCfg] = useState({ ppb: DEFAULT_PPB, conv: DEFAULT_CONV, flavors: [...DEFAULT_MAIN, ...DEFAULT_SUB] }) // 生產排程頁的每桶幾包、包數換算、口味清單
   const submitActionRef = useRef('normal')
   const [useBoxCalc, setUseBoxCalc] = useState(false)
   const [boxCountInput, setBoxCountInput] = useState('')
@@ -302,7 +310,7 @@ export default function OrdersPage({ user }) {
     pack: EMPTY_PACK,
     merge: EMPTY_MERGE, // 存檔時放進 cs.merge（資料庫沒有 merge 欄位）
     payDate: '', leadDays: LEAD_DAYS, // 付款日、交期天數：存檔時放進 cs
-    prodFrom: '', prodTo: '', qtyApprox: false, prodHint: '', terms: '', termsSave: false, // 客戶指定生產區間、數量是大概的、大概什麼時候做、結帳方式：存檔時放進 cs
+    prodFrom: '', prodTo: '', qtyApprox: false, prodHint: '', terms: '', termsSave: false, arrive: '', barrels: '', // 客戶指定生產區間、數量是大概的、大概什麼時候做、結帳方式、到貨日、桶數：存檔時放進 cs
   }
   const [formData, setFormData] = useState(emptyForm)
 
@@ -336,6 +344,34 @@ export default function OrdersPage({ user }) {
       if (data?.data) { setItemSpecs(data.data.itemSpecs || {}); setPlaces(data.data.places || []); setCustTerms(data.data.custTerms || {}) }
     })
   }, [])
+  useEffect(() => { // 算桶數用：每桶幾包（產量設定）、袋數→包數換算、口味清單（銷售計畫）
+    Promise.all([loadPage('yield'), loadPage('convert'), loadPage('sales')]).then(([y, cv, sl]) => {
+      setProdCfg({
+        ppb: { ...DEFAULT_PPB, ...(y.data?.data || {}) },
+        conv: { ...DEFAULT_CONV, ...(cv.data?.data || {}) },
+        flavors: flavorGroups(sl.data?.data?.saleData, sl.data?.data?.cats).all,
+      })
+    }).catch(() => { /* 讀不到就用預設 */ })
+  }, [])
+  // 這張單要幾桶：品名裡認得出口味（例：里仁剝皮辣椒水餃 → 剝皮）→ 袋數換包數 → ÷ 每桶幾包，無條件進位
+  // short＝日曆上的短名（品名到口味為止：里仁剝皮、黃金）
+  const barrelInfo = o => {
+    const item = String(o?.item_name || o?.itemName || '')
+    const f = prodCfg.flavors.filter(x => x && item.includes(x)).sort((a, b) => b.length - a.length)[0] || ''
+    const short = f ? item.slice(0, item.indexOf(f) + f.length) : item
+    const ppb = Number(prodCfg.ppb[f]) || 0
+    if (!f || !ppb) return { f, short, ppb: 0, packs: 0, barrels: 0 }
+    const bags = Number(o.quantity) || 0, g = Number(o.weight_per_bag) || 5250
+    const rules = (prodCfg.conv.rules || []).filter(r => Number(r.g) > 0 && Number(r.p) > 0)
+    const hit = rules.find(r => r.f && r.f === f && Number(r.g) === g) || rules.find(r => !r.f && Number(r.g) === g)
+    const packs = bags * (hit ? Number(hit.p) : g / (Number(prodCfg.conv.baseG) || 800))
+    return { f, short, ppb, packs: Math.round(packs * 100) / 100, barrels: packs > 0 ? Math.ceil(packs / ppb - 1e-9) : 0 }
+  }
+  const barrelsOf = o => Number(o?.cs?.barrels) || barrelInfo(o).barrels // 排入行程填的優先，沒填就自動算
+  const prodCalTitle = (o, n) => { // 生產排程的 Google 日曆標題：里仁剝皮*4桶（算不出桶數：品名*90箱）
+    const bi = barrelInfo(o), ap = isApprox(o) ? '約' : '', boxes = getBoxCount(o)
+    return n ? `${bi.short}*${ap}${n}桶` : `${o.item_name || o.itemName || ''}*${ap}${boxes ? `${boxes}箱` : `${Number(o.quantity) || 0}袋`}`
+  }
   const saveOrderConfig = async patch => {
     const next = { itemSpecs, places, custTerms, ...patch }
     if (patch.itemSpecs) setItemSpecs(patch.itemSpecs)
@@ -618,7 +654,7 @@ export default function OrdersPage({ user }) {
     const existingOrder = orders.find(o => o.id === editingOrderId)
     try {
       const now = new Date().toISOString()
-      const { merge, payDate, leadDays, prodFrom, prodTo, qtyApprox, prodHint, terms, termsSave, ...data } = pendingOrderData // 併櫃、付款日、生產區間、約略數量、大概時間、結帳方式不是資料庫欄位，放進 cs
+      const { merge, payDate, leadDays, prodFrom, prodTo, qtyApprox, prodHint, terms, termsSave, arrive, barrels, ...data } = pendingOrderData // 併櫃、付款日、生產區間、約略數量、大概時間、結帳方式、到貨日、桶數不是資料庫欄位，放進 cs
       const row = {
         id, ...data,
         status: existingOrder?.status || 'preorder', // 新接的單先放「預排客訂」，客服確認後才到等待排程
@@ -630,10 +666,11 @@ export default function OrdersPage({ user }) {
         const next = addDays(todayIso(), 1)
         row.cs = { receivedAt: now, owner: me, next, logs: [{ at: now, by: me, note: '接單', next, kind: 'new' }] }
       } else row.cs = { ...(existingOrder.cs || {}) }
-      row.cs = applyShip(row.cs, { payDate, leadDays, merge })
+      row.cs = applyShip(row.cs, { payDate, leadDays, merge, arrive })
       if (prodFrom && prodTo) { row.cs.prodFrom = prodFrom; row.cs.prodTo = prodTo } else { delete row.cs.prodFrom; delete row.cs.prodTo }
       if (qtyApprox) row.cs.qtyApprox = true; else delete row.cs.qtyApprox
       if (String(prodHint || '').trim()) row.cs.prodHint = String(prodHint).trim(); else delete row.cs.prodHint
+      if (Number(barrels) > 0) row.cs.barrels = Number(barrels); else delete row.cs.barrels // 桶數（沒填＝自動算）
       const termsEff = terms || termsOf(data.customer_name) // 這張單的結帳方式（沒選就是客戶平常的）
       if (termsEff) row.cs.terms = termsEff; else delete row.cs.terms
       let { error } = await supabase.from('adv_orders').upsert(row)
@@ -684,7 +721,7 @@ export default function OrdersPage({ user }) {
       ...emptyForm, ...order, pack: { ...EMPTY_PACK, ...(order.pack || {}) }, merge: mergeOf(order),
       items_per_box: order.items_per_box || order.box_qty_each || '',
       payDate: order.cs?.payDate || '', leadDays: order.cs?.leadDays || LEAD_DAYS,
-      prodFrom: toIso(order.cs?.prodFrom || ''), prodTo: toIso(order.cs?.prodTo || ''), qtyApprox: !!order.cs?.qtyApprox, prodHint: order.cs?.prodHint || '', terms: order.cs?.terms || '', termsSave: false,
+      prodFrom: toIso(order.cs?.prodFrom || ''), prodTo: toIso(order.cs?.prodTo || ''), qtyApprox: !!order.cs?.qtyApprox, prodHint: order.cs?.prodHint || '', terms: order.cs?.terms || '', termsSave: false, arrive: toIso(order.cs?.arrive || ''), barrels: order.cs?.barrels ? String(order.cs.barrels) : '',
     })
     if ((order.box_count||0) > 0) { setUseBoxCalc(true); setBoxCountInput(String(order.box_count)) }
     setEditingOrderId(order.id); setIsFormOpen(true)
@@ -811,7 +848,10 @@ export default function OrdersPage({ user }) {
       const w = prodWinOf(o)
       setConfWin({ from: w?.from || '', to: w?.to || '', open: !!(w || prodHintOf(o) || isOemOrder(o, itemSpecs)) })
     }
-    else if (o.status === 'pending') setStatusDate(toIso(o.scheduled_date || o.scheduledDate) || prodWinOf(o)?.from || formatDate(new Date())) // 排入行程：已經填過排程生產日就帶入；有客戶指定區間就先帶區間第一天
+    else if (o.status === 'pending') { // 排入行程：已經填過排程生產日就帶入；有客戶指定區間就先帶區間第一天；桶數自動算（可以改）
+      setStatusDate(toIso(o.scheduled_date || o.scheduledDate) || prodWinOf(o)?.from || formatDate(new Date()))
+      setStatusBarrels(String(barrelsOf(o) || ''))
+    }
     else setStatusDate(formatDate(new Date()))
     setStatusModal({ order: o, nextStatus: STATES[idx + 1], label: NEXT_ACTION[o.status] })
   }
@@ -820,7 +860,9 @@ export default function OrdersPage({ user }) {
   const shipStOf = o => {
     let m = mergeOf(o)
     if (!m.on && shipDateOf(o)) { const sib = orders.find(x => x.id !== o.id && x.status !== LOST && batchKey(x) === batchKey(o) && x.cs?.merge?.on); if (sib) m = mergeOf(sib) }
-    return { payDate: o.cs?.payDate || '', leadDays: o.cs?.leadDays || LEAD_DAYS, ship: shipDateOf(o) || mergeShipDate(m), merge: m, terms: o.cs?.terms || '', termsSave: false }
+    let arrive = toIso(o.cs?.arrive || '')
+    if (!arrive && shipDateOf(o)) { const sib = orders.find(x => x.id !== o.id && x.status !== LOST && batchKey(x) === batchKey(o) && x.cs?.arrive); if (sib) arrive = toIso(sib.cs.arrive) }
+    return { payDate: o.cs?.payDate || '', leadDays: o.cs?.leadDays || LEAD_DAYS, ship: shipDateOf(o) || mergeShipDate(m), merge: m, terms: o.cs?.terms || '', termsSave: false, arrive }
   }
   // 改併櫃日（或打開併櫃）就自動算出貨日（還是可以再改）
   const patchShip = (st, patch) => {
@@ -868,7 +910,7 @@ export default function OrdersPage({ user }) {
     .sort((a, b) => (sdOf(a) || '9999').localeCompare(sdOf(b) || '9999')), [orders])
 
   // ── Google 日曆：一批出貨（同客戶同出貨日、已確認的單）──
-  // 標題：達頓出貨12/2併（沒併櫃：達頓出貨）；內容：併櫃、地點、出貨內容
+  // 標題：達頓出貨12/2併（併櫃）／里仁出貨11/30到貨（有到貨日）／里仁出貨；內容：併櫃、地點、到貨日、出貨內容
   const batchCal = key => {
     const all = batches[key] || []
     const list = all.filter(o => o.status !== 'preorder')
@@ -877,13 +919,15 @@ export default function OrdersPage({ user }) {
     const o0 = list[0], td = shipDateOf(o0)
     const m = list.map(mergeOf).find(x => x.on && x.date) || null
     const place = m?.place ? places.find(x => x.name === m.place) : null
-    const title = `${parentOf(o0)}出貨${m ? `${mdOf(m.date)}併` : ''}`
+    const arrive = m ? '' : (list.map(o => toIso(o.cs?.arrive || '')).find(Boolean) || '')
+    const title = `${parentOf(o0)}出貨${m ? `${mdOf(m.date)}併` : arrive ? `${mdOf(arrive)}到貨` : ''}`
     const names = uniq(list.map(o => o.customer_name || o.customerName))
     const bags = list.reduce((s, o) => s + (Number(o.quantity) || 0), 0)
     const boxes = list.reduce((s, o) => s + getBoxCount(o), 0)
     const lines = []
     if (m) lines.push(`併櫃：${mdw(m.date)}${m.time ? ` ${m.time}` : ''}`)
     if (m?.place) { lines.push(m.place); if (place?.detail) lines.push(place.detail) }
+    if (arrive) lines.push(`到貨：${mdw(arrive)}`)
     if (lines.length) lines.push('')
     lines.push('出貨內容：')
     list.forEach(o => { const b = getBoxCount(o); lines.push(`• ${o.item_name || o.itemName} ${o.quantity}袋${b ? `（${b}箱）` : ''}${names.length > 1 ? ` — ${o.customer_name || o.customerName}` : ''}`) })
@@ -893,7 +937,7 @@ export default function OrdersPage({ user }) {
     const cal = list.map(o => o.cs || {}).find(c => c.calAt && c.calDate === td) || null
     return { list, pre, td, title, details, url: td ? gcalUrl(title, td, details) : '', cal, m }
   }
-  // ── 生產排程的 Google 日曆（等待排程）：格式跟生產排程頁一樣（標題 品項*數量；內容 品項、數量、日期、詳情）──
+  // ── 生產排程的 Google 日曆（等待排程）：標題跟生產排程頁一樣「里仁剝皮*4桶」；內容 品項、客戶、數量、日期、詳情 ──
   const prodCalInfo = o => {
     const date = toIso(o.scheduled_date || o.scheduledDate)
     const item = o.item_name || o.itemName || ''
@@ -902,7 +946,7 @@ export default function OrdersPage({ user }) {
     const ipb = Number(o.box_qty_each || o.items_per_box || o.itemsPerBox) || 0
     const td = shipDateOf(o)
     const ap = isApprox(o) ? '約' : '', w = prodWinOf(o)
-    const title = `${item}*${ap}${boxes ? `${boxes}箱` : `${bags}袋`}`
+    const title = prodCalTitle(o, barrelsOf(o))
     const lines = [
       `品項：${item}`,
       `客戶：${o.customer_name || o.customerName || ''}`,
@@ -1092,7 +1136,21 @@ export default function OrdersPage({ user }) {
     )
   }
   // 出貨日（確認訂單：可以先空著；定出貨日：必填）
-  const renderShipDate = (st, set, required) => (
+  // 到貨日：客戶要幾號到貨（沒併櫃才有）→ Google 日曆標題「里仁出貨11/30到貨」
+  const renderArrive = (st, set, calName) => st.merge?.on ? null : (
+    <div className="op-arrive" style={{ background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: 12, padding: '8px 10px', marginTop: 10 }}>
+      <div style={{ fontSize: 13, fontWeight: 800, color: '#166534', marginBottom: 6 }}>📦 到貨日 <span style={{ fontWeight: 500, color: '#15803d', fontSize: 12 }}>（選填：客戶要幾號到貨就填）</span></div>
+      <div style={{ display: 'flex', gap: 6 }}>
+        <input type="date" value={st.arrive || ''} onChange={e => set({ arrive: e.target.value })} aria-label="到貨日"
+          style={{ flex: 1, minWidth: 0, background: '#fff', border: '1px solid #bbf7d0', borderRadius: 10, padding: '8px', fontFamily: 'inherit', fontSize: 15 }} />
+        {st.arrive && <button type="button" onClick={() => set({ arrive: '' })} aria-label="清除到貨日" title="清除到貨日"
+          style={{ background: '#fff', border: '1px solid #bbf7d0', borderRadius: 10, padding: '0 10px', color: '#15803d', cursor: 'pointer', fontFamily: 'inherit' }}>✕</button>}
+      </div>
+      {st.arrive && st.ship && st.arrive < st.ship && <div style={{ color: '#dc2626', fontWeight: 800, fontSize: 13, marginTop: 4 }}>⚠ 到貨日比出貨日早</div>}
+      {st.arrive && <div className="op-arrive-cal" style={{ fontSize: 12, color: '#15803d', marginTop: 4 }}>Google 日曆會寫：<b>{calName}出貨{mdOf(st.arrive)}到貨</b></div>}
+    </div>
+  )
+  const renderShipDate = (st, set, required, calName) => (
     <div style={{ marginBottom: 12 }}>
       <div style={{ fontSize: 13, color: required ? '#dc2626' : '#475569', fontWeight: 700, marginBottom: 6 }}>
         {required ? '出貨日 *' : '出貨日'}
@@ -1100,6 +1158,7 @@ export default function OrdersPage({ user }) {
       </div>
       <input type="date" value={st.ship || ''} onChange={e => set({ ship: e.target.value })} aria-label="出貨日"
         style={{ width: '100%', background: '#f8fafc', border: `1px solid ${statusErr ? '#f87171' : '#e2e8f0'}`, borderRadius: 12, padding: '10px', fontFamily: 'inherit', fontSize: 15 }} />
+      {renderArrive(st, set, calName)}
     </div>
   )
   // 排入行程：提醒出貨日、交期（生產日不要比這兩個晚）
@@ -1478,6 +1537,7 @@ export default function OrdersPage({ user }) {
               const bPkg = batch.reduce((s, o) => s + getPkgCount(o), 0)
               const bBox = batch.reduce((s, o) => s + getBoxCount(o), 0)
               const bm = batch.map(mergeOf).find(x => x.on && x.date)
+              const ba = bm ? '' : (batch.map(o => toIso(o.cs?.arrive || '')).find(Boolean) || '') // 到貨日
               return (
               <div key={gKey} style={{ background: '#fff', borderRadius: 24, border: `1px solid ${th.border}`, overflow: 'hidden', marginBottom: 16, breakInside: 'avoid' }}>
                 {/* 母客戶＋出貨日標題列：筆數、包數、箱數算整批 */}
@@ -1490,9 +1550,10 @@ export default function OrdersPage({ user }) {
                     <span className="op-batch-total" style={{ fontSize: 13, color: 'rgba(255,255,255,.92)', fontWeight: 700 }}>共{batch.length}筆・{batch.some(isApprox) ? '約' : ''}{bPkg}包{bBox > 0 ? `・${batch.some(isApprox) ? '約' : ''}${bBox}箱` : ''}</span>
                   </div>
                 </div>
-                {(others.length > 0 || bm) && (
+                {(others.length > 0 || bm || ba) && (
                   <div className="op-batch-strip" style={{ background: th.bg, borderBottom: `1px solid ${th.border}`, padding: '6px 16px', fontSize: 13, color: th.accent, display: 'flex', flexWrap: 'wrap', gap: '4px 12px', alignItems: 'center' }}>
                     {bm && <span style={{ fontWeight: 800 }}>🚢 {mergeTxt(bm)}</span>}
+                    {ba && <span className="op-batch-arrive" style={{ fontWeight: 800 }}>📦 {mdw(ba)} 到貨</span>}
                     {others.length > 0 && (
                       <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
                         本區 {allOrders.length} 筆，同批另有
@@ -1757,7 +1818,7 @@ export default function OrdersPage({ user }) {
               {renderConfWin(statusModal.order)}
               {renderPay(shipSt, setShipP, statusModal.order.customer_name || statusModal.order.customerName)}
               {renderMerge(shipSt.merge, p => setShipP({ merge: p }), shipSt.ship, false)}
-              {renderShipDate(shipSt, setShipP, false)}
+              {renderShipDate(shipSt, setShipP, false, parentOf(statusModal.order))}
               {statusErr && <div style={{ color: '#dc2626', fontSize: 13, fontWeight: 700, margin: '-4px 0 12px' }}>{statusErr}</div>}
             </>}
             {statusModal.order.status === 'pending' && renderDueInfo(orders.find(x => x.id === statusModal.order.id) || statusModal.order, statusDate)}
@@ -1771,12 +1832,30 @@ export default function OrdersPage({ user }) {
               {statusErr && <div style={{ color: '#dc2626', fontSize: 13, fontWeight: 700, marginTop: 6 }}>{statusErr}</div>}
             </div>
             )}
+            {statusModal.order.status === 'pending' && (() => { // 桶數：自動算、可以改；Google 日曆標題跟著寫
+              const so = statusModal.order, bi = barrelInfo(so), nb = Number(statusBarrels) || 0
+              return (
+                <div className="op-barrels" style={{ marginTop: -4, marginBottom: 16 }}>
+                  <div style={{ fontSize: 13, color: '#94a3b8', fontWeight: 700, marginBottom: 6 }}>
+                    桶數 <span style={{ fontWeight: 500, fontSize: 12 }}>{bi.ppb ? `（${bi.f} 每桶 ${bi.ppb} 包：${fmtNum(bi.packs)} 包 → 自動算 ${bi.barrels} 桶，可以改）` : '（認不出口味，請自己填）'}</span>
+                  </div>
+                  <input type="number" min="0" step="0.5" value={statusBarrels} onChange={e => setStatusBarrels(e.target.value)} aria-label="桶數"
+                    style={{ width: '100%', background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 12, padding: '10px', fontFamily: 'inherit', fontSize: 15 }} />
+                  <div className="op-barrels-cal" style={{ fontSize: 12, color: '#64748b', marginTop: 6 }}>Google 日曆標題：<b style={{ color: '#1e293b' }}>{prodCalTitle(so, nb)}</b></div>
+                </div>
+              )
+            })()}
             <div style={{ display: 'flex', gap: 8 }}>
               <button onClick={() => setStatusModal(null)} style={{ flex: 1, padding: '11px', background: '#f1f5f9', border: 'none', borderRadius: 12, fontWeight: 700, color: '#64748b', cursor: 'pointer' }}>取消</button>
               <button onClick={async () => {
                 const o = statusModal.order, now = new Date().toISOString()
                 const updateData = { status: statusModal.nextStatus, updated_at: now }
-                if (o.status === 'pending') updateData.scheduled_date = statusDate
+                if (o.status === 'pending') {
+                  updateData.scheduled_date = statusDate
+                  const nb = Number(statusBarrels) || 0, cs = { ...(o.cs || {}) }
+                  if (nb > 0) cs.barrels = nb; else delete cs.barrels
+                  updateData.cs = cs
+                }
                 if (o.status === 'preorder') { // 確認訂單：出貨日可以先空著；記下誰、什麼時候確認；付款日、併櫃一起存
                   if (!!confWin.from !== !!confWin.to) { setStatusErr('生產區間要填開始和結束（只有一天就兩格填一樣）'); return }
                   if (confWin.from && confWin.to < confWin.from) { setStatusErr('生產區間的結束日比開始日早'); return }
@@ -1825,7 +1904,7 @@ export default function OrdersPage({ user }) {
               </div>
               {renderPay(shipSt, setShipP, nm)}
               {renderMerge(shipSt.merge, p => setShipP({ merge: p }), shipSt.ship, false)}
-              {renderShipDate(shipSt, setShipP, true)}
+              {renderShipDate(shipSt, setShipP, true, parentOf(o))}
               {others.length > 0 && (
                 <label style={{ display: 'flex', alignItems: 'flex-start', gap: 8, background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 12, padding: '8px 10px', marginBottom: 12, cursor: 'pointer', fontSize: 13, color: '#334155', lineHeight: 1.5 }}>
                   <input type="checkbox" checked={shipFor.withOthers} onChange={e => setShipFor(f => ({ ...f, withOthers: e.target.checked }))} aria-label="同客戶出貨日待定的一起定" style={{ width: 16, height: 16, marginTop: 2, flexShrink: 0 }} />
@@ -1962,6 +2041,7 @@ export default function OrdersPage({ user }) {
               {pendingOrderData.pack?.oem && <div style={{ background: '#fef3c7', borderRadius: 8, padding: '6px 10px', fontSize: 13, fontWeight: 800, color: '#92400e' }}>🏭 代工品（不進生產排程、庫存）</div>}
               {pendingOrderData.merge?.on && <div style={{ background: '#f0f9ff', borderRadius: 8, padding: '6px 10px', fontSize: 13, fontWeight: 700, color: '#0369a1' }}>🚢 {mergeTxt(pendingOrderData.merge)}</div>}
               {pendingOrderData.payDate && <div style={{ background: '#fffbeb', borderRadius: 8, padding: '6px 10px', fontSize: 13, fontWeight: 700, color: '#92400e' }}>💰 {mdOf(pendingOrderData.payDate)} 付款・⏰ 交期 {mdw(dueOf(pendingOrderData))}</div>}
+              {pendingOrderData.arrive && !pendingOrderData.merge?.on && <div style={{ background: '#f0fdf4', borderRadius: 8, padding: '6px 10px', fontSize: 13, fontWeight: 700, color: '#166534' }}>📦 {mdw(pendingOrderData.arrive)} 到貨</div>}
               {(pendingOrderData.terms || termsOf(pendingOrderData.customer_name)) && <div className="op-confirm-terms" style={{ background: '#f8fafc', borderRadius: 8, padding: '6px 10px', fontSize: 13, fontWeight: 700, color: '#475569' }}>💳 {(pendingOrderData.terms || termsOf(pendingOrderData.customer_name)) === 'fixed' ? '固定結帳' : '先付款'}</div>}
             </div>
             <button onClick={executeSave} style={{ width: '100%', padding: '12px', background: '#059669', color: '#fff', border: 'none', borderRadius: 16, fontWeight: 900, fontSize: 15, cursor: 'pointer', marginBottom: 8 }}>確認無誤，正式存檔</button>
@@ -2264,12 +2344,17 @@ export default function OrdersPage({ user }) {
               <div>
                 <div style={{ fontSize: 13, color: '#059669', fontWeight: 700, marginBottom: 4 }}>排程生產日</div>
                 <input type="date" name="scheduled_date" value={formData.scheduled_date} onChange={handleInputChange} aria-label="排程生產日" style={{ width: '100%', background: '#f0fdf4', border: 'none', borderRadius: 12, padding: '10px', fontFamily: 'inherit' }} />
+                {!formIsPre && formData.scheduled_date && (
+                  <input type="number" min="0" step="0.5" name="barrels" value={formData.barrels || ''} onChange={handleInputChange} aria-label="桶數" placeholder={`桶數（自動 ${barrelInfo(formData).barrels || '—'}）`}
+                    style={{ width: '100%', marginTop: 6, background: '#f0fdf4', border: 'none', borderRadius: 12, padding: '8px 10px', fontFamily: 'inherit', fontSize: 14 }} />
+                )}
               </div>
               <div>
                 <div style={{ fontSize: 13, color: '#ef4444', fontWeight: 700, marginBottom: 4 }}>{formIsPre ? '預計出貨日' : '出貨日'}<span style={{ fontWeight: 400, color: '#94a3b8', fontSize: 12 }}>（可先空著）</span></div>
                 <input type="date" name="target_date" value={formData.target_date} onChange={handleInputChange} aria-label={formIsPre ? '預計出貨日' : '出貨日'} style={{ width: '100%', background: '#fef2f2', border: 'none', borderRadius: 12, padding: '10px', fontFamily: 'inherit' }} />
               </div>
             </div>
+            {renderArrive({ ship: formData.target_date, arrive: formData.arrive, merge: formData.merge }, patch => setFormData(p => ({ ...p, ...patch })), parentOf(formData))}
             {renderPay({ payDate: formData.payDate, leadDays: formData.leadDays, ship: formData.target_date, terms: formData.terms, termsSave: formData.termsSave }, patch => setFormData(p => ({ ...p, ...patch })), formData.customer_name)}
             {renderMerge({ ...EMPTY_MERGE, ...(formData.merge || {}) }, setMerge, formData.target_date, true)}
 

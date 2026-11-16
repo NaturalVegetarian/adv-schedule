@@ -3,6 +3,7 @@ import { useEffect, useRef } from 'react'
 // 預排客訂 SOP（快速上手）：客訂管理 →「預排客訂」分頁最上面的「📖 預排客訂 SOP」打開
 // 截圖放在 public/sop/（網址 /sop/…）。流程或畫面有改：重拍截圖，並在 SOP_REVISIONS 最上面加一行，更新日期會跟著變
 export const SOP_REVISIONS = [
+  { date: '2026-11-16', note: '到貨日：確認訂單、定出貨日可以填到貨日，Google 日曆寫「里仁出貨11/30到貨」' },
   { date: '2026-11-16', note: '結帳方式：每張單選「先付款／固定結帳」；先付款沒付款，卡片標「等付款」' },
   { date: '2026-11-16', note: '代工：生產區間改在「確認訂單」時填；新增只記「大概什麼時候做」' },
   { date: '2026-11-16', note: '初版：新增、記一筆追蹤、確認訂單、未成交；代工的生產區間與約略數量' },
@@ -16,15 +17,15 @@ const C = { main: '#0e7490', dark: '#164e63', soft: '#ecfeff', line: '#a5f3fc', 
 const IMG = {
   'preorder-01-overview.png': [1600, 1115],
   'preorder-02-form-top.png': [904, 632],
-  'preorder-03-form-bottom.png': [888, 708],
+  'preorder-03-form-bottom.png': [888, 868],
   'preorder-04-card.png': [996, 638],
   'preorder-05-followup.png': [932, 696],
-  'preorder-06-confirm.png': [840, 1232],
+  'preorder-06-confirm.png': [840, 1412],
   'preorder-07-lost.png': [720, 718],
   'preorder-08-oem-card.png': [956, 620],
   'preorder-09-oem-list.png': [1600, 419],
   'preorder-10-oem-new.png': [856, 258],
-  'preorder-11-oem-confirm.png': [840, 1334],
+  'preorder-11-oem-confirm.png': [840, 1556],
   'preorder-12-oem-pending.png': [956, 464],
   'preorder-13-terms.png': [856, 328],
   'preorder-14-waitpay.png': [956, 380],
@@ -167,7 +168,7 @@ export default function PreorderSop({ onClose }) {
             '按「確認儲存」，看一下確認視窗，再按「確認無誤，正式存檔」。',
           ]} />
           <Shot src="preorder-02-form-top.png" alt="新增客訂表單：上半" cap="① 客戶名稱　② 品項規格（打字搜尋）　③ 訂購數量　④ 約（大概的量）" />
-          <Shot src="preorder-03-form-bottom.png" alt="新增客訂表單：下半" cap="① 預計出貨日（不知道可以空著）　② 結帳方式　③ 確認儲存" />
+          <Shot src="preorder-03-form-bottom.png" alt="新增客訂表單：下半" cap="① 預計出貨日（不知道可以空著）　② 到貨日（選填）　③ 結帳方式　④ 確認儲存" />
           <P>存好後卡片會出現在「預排客訂」，負責人就是你。</P>
 
           <H id="sop-log">步驟 2　每次聯絡客戶，記一筆追蹤</H>
@@ -200,11 +201,12 @@ export default function PreorderSop({ onClose }) {
                 '付款日：先付款的單收到款再填（可以先空著），填了自動算交期（付款日後 20 個工作天）；固定結帳不用填。',
                 '併櫃：這批要跟別的貨一起上櫃才勾。',
                 '預計出貨日：不知道就先空著。',
+                '到貨日：客戶要幾號到貨就填（選填），Google 日曆會寫「里仁出貨11/30到貨」；勾了併櫃的不用填。',
               ]} />
             </>,
             '按視窗下方的「確認 確認訂單」。',
           ]} />
-          <Shot src="preorder-06-confirm.png" alt="確認訂單視窗" cap="① 客戶有指定生產區間才點開　② 結帳方式（第一次選；之後自動帶入）　③ 確認 確認訂單" />
+          <Shot src="preorder-06-confirm.png" alt="確認訂單視窗" cap="① 客戶有指定生產區間才點開　② 結帳方式（第一次選；之後自動帶入）　③ 到貨日（選填）　④ 確認 確認訂單" />
           <P>出貨日先空著的單：等生產排程科排好生產日，「預排客訂」上方會出現「🚚 已排好生產、等客服定出貨日」，按「🚚 定出貨日」補上就好。</P>
 
           <H id="sop-pay">結帳方式：先付款／固定結帳</H>
@@ -241,7 +243,7 @@ export default function PreorderSop({ onClose }) {
           <Ol start={3} items={[
             '客戶給了幾號～幾號 → 按卡片上的「確認訂單 ›」，視窗最上面「🗓 客戶指定生產區間」填開始～結束（只有一天就兩格填一樣），再按「確認 確認訂單」。',
           ]} />
-          <Shot src="preorder-11-oem-confirm.png" alt="確認訂單：填客戶指定生產區間" cap="① 填客戶給的幾號～幾號（上面會提示客戶原本說的）　② 里仁是固定結帳：不用付款日　③ 確認 確認訂單" />
+          <Shot src="preorder-11-oem-confirm.png" alt="確認訂單：填客戶指定生產區間" cap="① 填客戶給的幾號～幾號（上面會提示客戶原本說的）　② 里仁是固定結帳：不用付款日　③ 到貨日：Google 日曆寫「里仁出貨11/30到貨」　④ 確認 確認訂單" />
           <Ol start={4} items={[
             '確認後卡片顯示「🗓 生產區間 M/D～M/D」：快到了變橘色，過了還沒排變紅色。客戶改日期 → 按 ✏️ 改區間。',
             '生產排程科在「生產排程」頁的「🏭 代工」清單看得到；按「排入行程」時會先帶區間第一天，排到區間外會紅字警告。',
@@ -258,6 +260,7 @@ export default function PreorderSop({ onClose }) {
             ['代工客戶改了生產日期', '已確認的單按 ✏️，改「客戶指定生產區間」'],
             ['先付款的客戶付款了', '按 ✏️（或 🚚 定出貨日）填付款日，「等付款」就會消失'],
             ['結帳方式帶錯了', '這張點另一個；要以後都改，勾「以後 ○○ 都用…」'],
+            ['Google 日曆的出貨要寫到貨日', '確認訂單或 🚚 定出貨日填「到貨日」；已經加過日曆的，要到日曆手動改標題'],
             ['建錯單', '按 🗑 永久刪除（會先問你確定）；客戶沒要的單請用「未成交」'],
             ['未成交的單客戶又要了', '到最下面「未成交紀錄」恢復'],
             ['共用電腦、平板', '用完按右上角「登出」，下一個人才不會記成你的名字'],
